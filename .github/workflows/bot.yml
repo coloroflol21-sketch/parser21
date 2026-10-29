@@ -20,8 +20,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: dead_keys.db
-          key: dead-keys-db
-          restore-keys: dead-keys-db
+          key: dead-keys-db-${{ github.run_id }}
+          restore-keys: |
+            dead-keys-db- #
           
       - name: Run Bot
         env:
@@ -37,4 +38,4 @@ jobs:
         if: always()
         with:
           path: dead_keys.db
-          key: dead-keys-db
+          key: dead-keys-db-${{ github.run_id }}
