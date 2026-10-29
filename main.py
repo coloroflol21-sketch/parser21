@@ -68,28 +68,21 @@ REPO_HINTS = {
 }
 
 # ─── БАЗА ДАННЫХ ───────────────────────────────────────────────────────────
+# ─── БАЗА ДАННЫХ (ТЕКСТОВЫЙ ФАЙЛ) ──────────────────────────────────────────
 def init_db():
-    conn = sqlite3.connect('dead_keys.db')
-    conn.execute('CREATE TABLE IF NOT EXISTS dead_keys (key TEXT PRIMARY KEY)')
-    conn.commit()
-    
-    # Считаем, сколько ключей уже в базе
-    count = conn.execute("SELECT COUNT(*) FROM dead_keys").fetchone()[0]
-    logger.info(f"🗄 База данных загружена. В памяти уже {count} мертвых ключей.")
-    
-    conn.close()
+    if not os.path.exists('dead_keys.txt'):
+        open('dead_keys.txt', 'w').close()
+    logger.info("🗄 База данных dead_keys.txt инициализирована.")
 
 def is_dead(key):
-    conn = sqlite3.connect('dead_keys.db')
-    res = conn.execute("SELECT 1 FROM dead_keys WHERE key=?", (key,)).fetchone()
-    conn.close()
-    return res is not None
+    if not os.path.exists('dead_keys.txt'): return False
+    with open('dead_keys.txt', 'r', encoding='utf-8') as f:
+        return key in f.read()
 
 def mark_dead(key):
-    conn = sqlite3.connect('dead_keys.db')
-    conn.execute("INSERT OR IGNORE INTO dead_keys (key) VALUES (?)", (key,))
-    conn.commit()
-    conn.close()
+    # Просто дописываем ключ в конец файла
+    with open('dead_keys.txt', 'a', encoding='utf-8') as f:
+        f.write(f"{key}\n")
 
 # ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
