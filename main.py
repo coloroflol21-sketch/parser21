@@ -113,7 +113,6 @@ def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
-    # Кавычки отсекают мусор вроде "task-"
     queries = [
         "sk-proj- language:Python", "sk-ant-api03- language:Python", 
         "sk-kimi- language:Python", "sk-cp- language:Python",
@@ -139,19 +138,17 @@ def fetch_github_targets():
             repo, path = item["repository"]["full_name"], item["path"]
             logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
             
-                        try:
-                # stream=True говорит "не качай всё в память сразу, дай заголовки"
+            try:
+                # stream=True позволяет проверить размер до скачивания
                 file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5, stream=True)
                 if file_resp.status_code != 200:
                     continue
                     
-                # Смотрим размер файла
                 content_length = file_resp.headers.get('content-length')
-                if content_length and int(content_length) > 100_000: # Если больше 100 КБ
+                if content_length and int(content_length) > 100_000:
                     logger.info(f"      ⏩ Пропускаю большой файл ({(int(content_length)//1024)} КБ)")
                     continue
                     
-                # Читаем текст
                 text = file_resp.content.decode('utf-8', errors='ignore')
             except requests.RequestException:
                 continue
@@ -162,7 +159,6 @@ def fetch_github_targets():
                     for match in p["regex"].finditer(line):
                         token = match.group(0)
                         
-                        # Защита от дубликатов: generic-sk не берет официальные префиксы
                         if p["provider"] == "generic-sk":
                             if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
                                 continue
