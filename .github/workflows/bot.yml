@@ -2,7 +2,7 @@ name: Run Telegram Bot
 
 on:
   schedule:
-    - cron: "1 22 * * *" # Перезапуск каждые 5 минут (минимум для GitHub)
+    - cron: "*/5 * * * *" # Перезапуск каждые 5 минут (минимум для GitHub)
   workflow_dispatch:
 
 concurrency:
