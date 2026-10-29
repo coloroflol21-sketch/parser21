@@ -6,7 +6,6 @@ import requests
 import logging
 import asyncio
 import random
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
@@ -68,7 +67,7 @@ REPO_HINTS = {
 }
 
 # ─── БАЗА ДАННЫХ (ТЕКСТОВЫЙ ФАЙЛ) ──────────────────────────────────────────
-dead_keys_set = set() # Храним ключи в памяти для мгновенной проверки
+dead_keys_set = set() 
 
 def init_db():
     global dead_keys_set
@@ -103,7 +102,11 @@ def get_urls_from_repo_configs(repo):
                     if f_resp.status_code == 200:
                         for u in URL_REGEX.findall(f_resp.text):
                             if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
-                            match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                            
+                            # Умная обрезка: сначала v1, потом api
+                            match = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
+                            if not match:
+                                match = re.search(r'(.*?/api)', u)
                             if match: found_urls.append(match.group(1))
     except: pass
     repo_url_cache[repo] = list(set(found_urls))
@@ -139,7 +142,6 @@ def fetch_github_targets():
             logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
             
             try:
-                # stream=True позволяет проверить размер до скачивания
                 file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5, stream=True)
                 if file_resp.status_code != 200:
                     continue
@@ -168,7 +170,11 @@ def fetch_github_targets():
                         # ПРИОРИТЕТ 1: URL в этой же строке
                         for u in URL_REGEX.findall(line):
                             if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
-                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                            
+                            # Умная обрезка: сначала v1, потом api
+                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
+                            if not match_url:
+                                match_url = re.search(r'(.*?/api)', u)
                             if match_url: api_urls.append(match_url.group(1))
                         
                         # ПРИОРИТЕТ 2: Префикс ключа
@@ -280,6 +286,7 @@ async def long_scan_loop():
                 report = f"⚠️ Ключ с лимитом\n🌐 {endpoint}\n🗝 {key}"
                 if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 total_working += 1; cycle_working += 1
+                mark_dead(key)
                 continue
                 
             logger.info(f"   └ ✅ Доступно моделей: {len(chk['models'])}. Делаю пробы...")
@@ -290,6 +297,7 @@ async def long_scan_loop():
                 total_working += 1; cycle_working += 1
                 if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
+                mark_dead(key) # <--- ТЕПЕРЬ РАБОЧИЕ КЛЮЧИ ТОЖЕ СОХРАНЯЮТСЯ В БАЗУ
             else:
                 logger.info("   └ ❌ Мертвый (все пробы 401/403)")
                 mark_dead(key)
