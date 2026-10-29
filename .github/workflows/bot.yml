@@ -32,4 +32,5 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PARSER_PAT }}
+          RUN_DURATION_SECONDS: "60"
         run: python bot_runner.py
