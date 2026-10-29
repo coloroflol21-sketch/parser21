@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import sys
@@ -81,19 +82,36 @@ repo_url_cache = {}
 def get_urls_from_repo_configs(repo):
     if repo in repo_url_cache:
         return repo_url_cache[repo]
-    config_files = ["config.py", "settings.py", "config.json", ".env", ".env.example"]
+        
     found_urls = []
-    for file_path in config_files:
-        try:
-            url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
-            resp = requests.get(url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
-            if resp.status_code == 200:
-                urls = URL_REGEX.findall(resp.text)
-                for u in urls:
-                    if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
-                    match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
-                    if match: found_urls.append(match.group(1))
-        except: pass
+    try:
+        # 1. Получаем дерево файлов репозитория (1 запрос)
+        tree_url = f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1"
+        resp = requests.get(tree_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10)
+        
+        if resp.status_code == 200:
+            tree = resp.json().get("tree", [])
+            
+            # 2. Ищем файлы конфигов
+            config_files = []
+            for item in tree:
+                if item["type"] == "blob" and any(x in item["path"].lower() for x in ['.env', 'config', 'settings']):
+                    config_files.append(item["path"])
+            
+            # Берем максимум 3 файла, чтобы не спамить API
+            for path in config_files[:3]:
+                file_url = f"https://api.github.com/repos/{repo}/contents/{path}"
+                f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+                
+                if f_resp.status_code == 200:
+                    urls = URL_REGEX.findall(f_resp.text)
+                    for u in urls:
+                        if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
+                        match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                        if match: found_urls.append(match.group(1))
+    except Exception as e:
+        logger.error(f"Ошибка при поиске конфигов в {repo}: {e}")
+        
     repo_url_cache[repo] = list(set(found_urls))
     return repo_url_cache[repo]
 
