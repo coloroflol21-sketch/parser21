@@ -174,8 +174,9 @@ async def run_scan():
         report = format_report(key, endpoint, models, probes)
         if report:
             working_count += 1
-            if CHAT_ID:
-                await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+                # Отчет о завершении, чтобы ты знал, что бот отработал
+                if CHAT_ID:
+                    await app.bot.send_message(chat_id=CHAT_ID, text=f"🤖 Скан завершен. Проверено целей: {len(targets)}. Рабочих: {working_count}")
             logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
         else:
             logger.info("   └ Мертвый (все пробы 401/403)")
