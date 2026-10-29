@@ -61,8 +61,8 @@ KEY_PATTERNS = [
     {"provider": "huggingface",    "regex": re.compile(r"\bhf_[A-Za-z]{34}\b")},
     # Cohere
     {"provider": "cohere",         "regex": re.compile(r"\bco-[A-Za-z0-9_-]{20,}\b")},
-    # fallback: любой sk-
-    {"provider": "generic-sk",     "regex": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")},
+    # fallback: любой sk- (требует цифры, заглавные и строчные буквы, мин. 32 символа)
+    {"provider": "generic-sk",     "regex": re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{32,}\b")},
 ]
 
 
