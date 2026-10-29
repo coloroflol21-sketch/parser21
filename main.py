@@ -139,14 +139,24 @@ def fetch_github_targets():
             repo, path = item["repository"]["full_name"], item["path"]
             logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
             
-            try:
-                file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+                        try:
+                # stream=True говорит "не качай всё в память сразу, дай заголовки"
+                file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5, stream=True)
                 if file_resp.status_code != 200:
                     continue
+                    
+                # Смотрим размер файла
+                content_length = file_resp.headers.get('content-length')
+                if content_length and int(content_length) > 100_000: # Если больше 100 КБ
+                    logger.info(f"      ⏩ Пропускаю большой файл ({(int(content_length)//1024)} КБ)")
+                    continue
+                    
+                # Читаем текст
+                text = file_resp.content.decode('utf-8', errors='ignore')
             except requests.RequestException:
                 continue
                 
-            lines = file_resp.text.split('\n')
+            lines = text.split('\n')
             for line in lines:
                 for p in KEY_PATTERNS:
                     for match in p["regex"].finditer(line):
