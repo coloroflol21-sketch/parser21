@@ -1,12 +1,13 @@
 name: Parser Bot
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *" # Теперь можно поставить раз в час, так как скрипт сам работает 60 минут
   workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 65 # <--- УВЕЛИЧИЛИ ТАЙМАУТ
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
