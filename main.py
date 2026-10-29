@@ -105,10 +105,13 @@ def fetch_targets():
     queries = [
         "sk-proj- language:Python", 
         "sk-ant-api03- language:Python", 
-        "sk-proj- language:JavaScript",
-        "hf_ language:JSON", 
+        "sk-kimi- language:Python",
+        "sk-cp- language:Python",
+        "sk-sp- language:Python",
+        "hf_ language:Python",
         "sk- language:JSON", 
-        "sk- language:YAML"
+        "sk- language:YAML",
+        "sk- language:JavaScript"
     ]
     query = random.choice(queries)
     page = random.randint(1, 10) # Расширили страницы
