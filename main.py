@@ -67,22 +67,24 @@ REPO_HINTS = {
     "cerebras": "https://api.cerebras.ai/v1", "deepinfra": "https://api.deepinfra.com/v1/openai",
 }
 
-# ─── БАЗА ДАННЫХ ───────────────────────────────────────────────────────────
 # ─── БАЗА ДАННЫХ (ТЕКСТОВЫЙ ФАЙЛ) ──────────────────────────────────────────
+dead_keys_set = set() # Храним ключи в памяти для мгновенной проверки
+
 def init_db():
-    if not os.path.exists('dead_keys.txt'):
-        open('dead_keys.txt', 'w').close()
-    logger.info("🗄 База данных dead_keys.txt инициализирована.")
+    global dead_keys_set
+    if os.path.exists('dead_keys.txt'):
+        with open('dead_keys.txt', 'r', encoding='utf-8') as f:
+            dead_keys_set = set(line.strip() for line in f if line.strip())
+    logger.info(f"🗄 База данных dead_keys.txt загружена. В памяти уже {len(dead_keys_set)} мертвых ключей.")
 
 def is_dead(key):
-    if not os.path.exists('dead_keys.txt'): return False
-    with open('dead_keys.txt', 'r', encoding='utf-8') as f:
-        return key in f.read()
+    return key in dead_keys_set
 
 def mark_dead(key):
-    # Просто дописываем ключ в конец файла
-    with open('dead_keys.txt', 'a', encoding='utf-8') as f:
-        f.write(f"{key}\n")
+    if key not in dead_keys_set:
+        dead_keys_set.add(key)
+        with open('dead_keys.txt', 'a', encoding='utf-8') as f:
+            f.write(f"{key}\n")
 
 # ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
