@@ -29,10 +29,10 @@ jobs:
         run: python main.py
         
       # СОХРАНЯЕМ ФАЙЛ В РЕПОЗИТОРИЙ
-      - name: Commit Dead Keys
+      - name: Commit Dead Hashes
         if: always()
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add dead_keys.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead keys [skip ci]" && git push)
+          git add dead_hashes.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead hashes [skip ci]" && git push)
