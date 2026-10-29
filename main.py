@@ -72,6 +72,11 @@ def init_db():
     conn = sqlite3.connect('dead_keys.db')
     conn.execute('CREATE TABLE IF NOT EXISTS dead_keys (key TEXT PRIMARY KEY)')
     conn.commit()
+    
+    # Считаем, сколько ключей уже в базе
+    count = conn.execute("SELECT COUNT(*) FROM dead_keys").fetchone()[0]
+    logger.info(f"🗄 База данных загружена. В памяти уже {count} мертвых ключей.")
+    
     conn.close()
 
 def is_dead(key):
