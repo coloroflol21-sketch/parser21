@@ -282,7 +282,7 @@ async def long_scan_loop():
             if report:
                 total_working += 1
                 cycle_working += 1
-                if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+                if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
             else:
                 logger.info("   └ ❌ Мертвый (все пробы 401/403)")
@@ -290,7 +290,7 @@ async def long_scan_loop():
         
         if time.time() - cycle_start_time >= REPORT_INTERVAL:
             summary = f"⏳ **Отчет**\nЗа {REPORT_INTERVAL//60} мин:\nПроверено: {total_checked}\nНовых рабочих: {cycle_working}"
-            if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode="Markdown")
+            if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=summary)
             cycle_start_time = time.time()
             cycle_working = 0
             
