@@ -4,38 +4,35 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+# Даем боту права на запись в репозиторий, чтобы он мог делать коммит
+permissions:
+  contents: write
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          
       - run: pip install -r requirements.txt
-      
-      # Восстанавливаем базу мертвых ключей
-      - name: Restore DB Cache
-        uses: actions/cache/restore@v4
-        with:
-          path: dead_keys.db
-          key: dead-keys-db-${{ github.run_id }}
-          restore-keys: |
-            dead-keys-db- #
           
       - name: Run Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PARSER_PAT }}
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python main.py
         
-      # Сохраняем базу обратно
-      - name: Save DB Cache
-        uses: actions/cache/save@v4
+      # СОХРАНЯЕМ ФАЙЛ В РЕПОЗИТОРИЙ
+      - name: Commit Dead Keys
         if: always()
-        with:
-          path: dead_keys.db
-          key: dead-keys-db-${{ github.run_id }}
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add dead_keys.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead keys [skip ci]" && git push)
