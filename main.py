@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import sys
@@ -71,19 +72,21 @@ dead_keys_set = set()
 
 def init_db():
     global dead_keys_set
-    if os.path.exists('dead_keys.txt'):
-        with open('dead_keys.txt', 'r', encoding='utf-8') as f:
+    if os.path.exists('dead_hashes.txt'):
+        with open('dead_hashes.txt', 'r', encoding='utf-8') as f:
             dead_keys_set = set(line.strip() for line in f if line.strip())
-    logger.info(f"🗄 База данных dead_keys.txt загружена. В памяти уже {len(dead_keys_set)} мертвых ключей.")
+    logger.info(f"🗄 База данных загружена. В памяти уже {len(dead_keys_set)} мертвых ключей.")
 
 def is_dead(key):
-    return key in dead_keys_set
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    return key_hash in dead_keys_set
 
 def mark_dead(key):
-    if key not in dead_keys_set:
-        dead_keys_set.add(key)
-        with open('dead_keys.txt', 'a', encoding='utf-8') as f:
-            f.write(f"{key}\n")
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    if key_hash not in dead_keys_set:
+        dead_keys_set.add(key_hash)
+        with open('dead_hashes.txt', 'a', encoding='utf-8') as f:
+            f.write(f"{key_hash}\n")
 
 # ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
