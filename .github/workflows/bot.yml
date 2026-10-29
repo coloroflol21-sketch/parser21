@@ -41,6 +41,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PARSER_PAT }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          RUN_ONCE: "true"               # <-- ДОБАВИТЬ
+          RUN_DURATION_SECONDS: "600"    # <-- ДОБАВИТЬ (10 минут)
         run: python bot_runner.py
 
       - name: Save State Cache
