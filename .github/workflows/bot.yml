@@ -2,7 +2,7 @@ name: Run Telegram Bot
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "*/5 * * * *" # Перезапуск каждые 5 минут (минимум для GitHub)
   workflow_dispatch:
 
 concurrency:
@@ -28,9 +28,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install python-telegram-bot requests
 
+      - name: Restore State Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: |
+            bot-state-
+
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PARSER_PAT }}
-          RUN_DURATION_SECONDS: "60"
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python bot_runner.py
+
+      - name: Save State Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_id }}
