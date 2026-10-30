@@ -271,7 +271,10 @@ def fetch_apify_targets():
     client = ApifyClient(APIFY_TOKEN)
     targets = []
     
+    # Случайно выбираем один из двух акторов для разнообразия
     actor_choice = random.choice(["jungle", "thescrapelab"])
+    
+    # Базовые ключевые слова для поиска (наши паттерны)
     search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
     
     try:
@@ -285,8 +288,8 @@ def fetch_apify_targets():
             run = client.actor("jungle_synthesizer/osint-scraper").call(run_input=run_input)
             
             if run:
-                # ИСПРАВЛЕНО: используем ключ словаря
-                for item in client.dataset(run['defaultDatasetId']).iterate_items():
+                for item in client.dataset(run.default_dataset_id).iterate_items():
+                    # У jungle_synthesizer сниппет лежит в поле 'snippet'
                     snippet = item.get("snippet", "")
                     if snippet:
                         targets.extend(extract_keys_from_text(snippet))
@@ -299,8 +302,8 @@ def fetch_apify_targets():
             run = client.actor("thescrapelab/pastebin-osint-scraper").call(run_input=run_input)
             
             if run:
-                # ИСПРАВЛЕНО: используем ключ словаря
-                for item in client.dataset(run['defaultDatasetId']).iterate_items():
+                for item in client.dataset(run.default_dataset_id).iterate_items():
+                    # У thescrapelab текст может лежать в 'text', 'content' или 'snippet'
                     text = item.get("text") or item.get("content") or item.get("snippet") or ""
                     if text:
                         targets.extend(extract_keys_from_text(text))
@@ -310,110 +313,6 @@ def fetch_apify_targets():
     except Exception as e:
         logger.error(f"❌ Ошибка Apify ({actor_choice}): {e}")
         return []
-
-# ─── ПАРСИНГ PSBDMP.WS (С ЗАГРУЗКОЙ ТЕКСТА) ────────────────────────────────
-def fetch_psbdmp_targets():
-    logger.info("📋 Ищу ключи на Pastebin (psbdmp.ws)...")
-    targets = []
-    
-    search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
-    max_pastes_per_term = 5 
-    
-    for term in search_terms:
-        try:
-            url = f"https://psbdmp.ws/api/search/v3/{term}"
-            resp = requests.get(url, timeout=15)
-            
-            if resp.status_code == 404:
-                continue
-            if resp.status_code != 200:
-                logger.warning(f"⚠️ psbdmp.ws вернул {resp.status_code} для '{term}'")
-                continue
-                
-            data = resp.json()
-            
-            # ИСПРАВЛЕНО: API может вернуть список напрямую
-            if isinstance(data, list):
-                pastes = data
-            elif isinstance(data, dict):
-                pastes = data.get("data", [])
-            else:
-                pastes = []
-            
-            for paste in pastes[:max_pastes_per_term]:
-                paste_id = paste.get("id")
-                if not paste_id:
-                    continue
-                
-                dump_url = f"https://psbdmp.ws/api/v3/dump/{paste_id}"
-                dump_resp = requests.get(dump_url, timeout=10)
-                
-                if dump_resp.status_code == 200:
-                    dump_data = dump_resp.json()
-                    content = dump_data.get("content", "")
-                    
-                    if content:
-                        extracted = extract_keys_from_text(content)
-                        targets.extend(extracted)
-                        if extracted:
-                            logger.info(f"   └ Найдено {len(extracted)} ключей в пасте {paste_id}")
-                else:
-                    logger.warning(f"   └ Не удалось загрузить пасту {paste_id} (код {dump_resp.status_code})")
-                    
-            time.sleep(0.5)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка psbdmp.ws для '{term}': {e}")
-            
-    logger.info(f"✅ psbdmp.ws: всего найдено целей: {len(targets)}")
-    return targets
-
-# ─── ПАРСИНГ GREP.APP ──────────────────────────────────────────────────────
-def fetch_grep_app_targets():
-    logger.info("🔎 Ищу ключи на GitHub через grep.app...")
-    targets = []
-    
-    # Стандартные заголовки браузера, чтобы обмануть защиту от ботов
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
-    
-    search_terms = ["sk-proj-", "sk-ant-", "hf_", "sk-kimi-", "sk-cp-", "AIzaSy", "pplx-", "gsk_"]
-    
-    for term in search_terms:
-        try:
-            url = "https://grep.app/api/search"
-            params = {"q": term, "page": random.randint(1, 3)}
-            resp = requests.get(url, params=params, headers=headers, timeout=15)
-            
-            # Если сработала защита (403), мгновенно выходим, чтобы переключиться на другой канал
-            if resp.status_code == 403:
-                logger.warning(f"⚠️ grep.app: Сработала защита от ботов (403). Переключаюсь на другой источник.")
-                return targets 
-                
-            if resp.status_code != 200:
-                logger.warning(f"⚠️ grep.app вернул {resp.status_code} для '{term}'")
-                continue
-                
-            data = resp.json()
-            hits = data.get("hits", {}).get("hits", [])
-            
-            for hit in hits:
-                snippet = hit.get("content", {}).get("snippet", "")
-                if snippet:
-                    extracted = extract_keys_from_text(snippet)
-                    targets.extend(extracted)
-                    if extracted:
-                        logger.info(f"   └ Найдено {len(extracted)} ключей в сниппете из {hit.get('repo', 'unknown')}")
-                        
-            time.sleep(0.5)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка grep.app для '{term}': {e}")
-            
-    logger.info(f"✅ grep.app: всего найдено целей: {len(targets)}")
-    return targets
 
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
@@ -461,18 +360,15 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
+        # 60% - GitHub, 20% - Jungle, 20% - TheScrapelab
         chance = random.random()
-        if chance < 0.4:
+        if chance < 0.6:
             targets = await asyncio.to_thread(fetch_github_targets)
-        elif chance < 0.6:
-            targets = await asyncio.to_thread(fetch_apify_targets)
-        elif chance < 0.8:
-            targets = await asyncio.to_thread(fetch_psbdmp_targets)
         else:
-            targets = await asyncio.to_thread(fetch_grep_app_targets)
+            targets = await asyncio.to_thread(fetch_apify_targets)
             
         total_checked += len(targets)
-        # ... дальше цикл for t in targets (без изменений)
+        # ... дальше идет цикл for t in targets: (его менять не нужно)
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
