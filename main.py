@@ -271,10 +271,7 @@ def fetch_apify_targets():
     client = ApifyClient(APIFY_TOKEN)
     targets = []
     
-    # Случайно выбираем один из двух акторов для разнообразия
     actor_choice = random.choice(["jungle", "thescrapelab"])
-    
-    # Базовые ключевые слова для поиска (наши паттерны)
     search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
     
     try:
@@ -288,8 +285,8 @@ def fetch_apify_targets():
             run = client.actor("jungle_synthesizer/osint-scraper").call(run_input=run_input)
             
             if run:
-                for item in client.dataset(run.default_dataset_id).iterate_items():
-                    # У jungle_synthesizer сниппет лежит в поле 'snippet'
+                # ИСПРАВЛЕНО: используем ключ словаря
+                for item in client.dataset(run['defaultDatasetId']).iterate_items():
                     snippet = item.get("snippet", "")
                     if snippet:
                         targets.extend(extract_keys_from_text(snippet))
@@ -302,8 +299,8 @@ def fetch_apify_targets():
             run = client.actor("thescrapelab/pastebin-osint-scraper").call(run_input=run_input)
             
             if run:
-                for item in client.dataset(run.default_dataset_id).iterate_items():
-                    # У thescrapelab текст может лежать в 'text', 'content' или 'snippet'
+                # ИСПРАВЛЕНО: используем ключ словаря
+                for item in client.dataset(run['defaultDatasetId']).iterate_items():
                     text = item.get("text") or item.get("content") or item.get("snippet") or ""
                     if text:
                         targets.extend(extract_keys_from_text(text))
