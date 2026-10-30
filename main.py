@@ -8,8 +8,6 @@ import logging
 import asyncio
 import random
 from concurrent.futures import ThreadPoolExecutor
-import subprocess
-import json
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -89,54 +87,6 @@ def mark_dead(key):
         dead_keys_set.add(key_hash)
         with open('dead_hashes.txt', 'a', encoding='utf-8') as f:
             f.write(f"{key_hash}\n")
-
-def fetch_gitlab_harvester_targets():
-    logger.info("🦊 Ищу ключи на GitLab через Harvester...")
-    gitlab_token = os.getenv("GITLAB_TOKEN")
-    if not gitlab_token:
-        logger.warning("⚠️ GITLAB_TOKEN не задан. Пропускаю GitLab.")
-        return []
-
-    targets = []
-    # Ключевые слова для поиска
-    search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
-    
-    for term in search_terms:
-        try:
-            # Вызываем утилиту через subprocess и просим вывод в JSON
-            cmd = [
-                "gitlab-harvester",
-                "--token", gitlab_token,
-                "--search", term,
-                "--format", "json",
-                "--limit", "20"  # Ограничиваем количество результатов
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode != 0:
-                logger.warning(f"⚠️ GitLab Harvester завершился с ошибкой для '{term}': {result.stderr[:200]}")
-                continue
-                
-            # Парсим JSON-вывод
-            try:
-                data = json.loads(result.stdout)
-                for item in data.get("results", []):
-                    # Harvester обычно возвращает сниппет кода в поле "snippet" или "content"
-                    snippet = item.get("snippet") or item.get("content") or ""
-                    if snippet:
-                        targets.extend(extract_keys_from_text(snippet))
-            except json.JSONDecodeError:
-                logger.warning(f"⚠️ Не удалось распарсить JSON от Harvester для '{term}'")
-                
-            time.sleep(1) # Пауза между ключевыми словами
-            
-        except subprocess.TimeoutExpired:
-            logger.warning(f"⚠️ GitLab Harvester завис на '{term}'. Пропускаю.")
-        except Exception as e:
-            logger.error(f"❌ Ошибка GitLab Harvester для '{term}': {e}")
-
-    logger.info(f"✅ GitLab Harvester: всего найдено целей: {len(targets)}")
-    return targets
 
 # ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
@@ -366,7 +316,7 @@ def fetch_apify_targets():
             run = client.actor("jungle_synthesizer/osint-scraper").call(run_input=run_input)
             
             if run:
-                for item in client.dataset(run.default_dataset_id).iterate_items():
+                for item in client.dataset(run['defaultDatasetId']).iterate_items():
                     # У jungle_synthesizer сниппет лежит в поле 'snippet'
                     snippet = item.get("snippet", "")
                     if snippet:
@@ -380,7 +330,7 @@ def fetch_apify_targets():
             run = client.actor("thescrapelab/pastebin-osint-scraper").call(run_input=run_input)
             
             if run:
-                for item in client.dataset(run.default_dataset_id).iterate_items():
+                for item in client.dataset(run['defaultDatasetId']).iterate_items():
                     # У thescrapelab текст может лежать в 'text', 'content' или 'snippet'
                     text = item.get("text") or item.get("content") or item.get("snippet") or ""
                     if text:
@@ -438,15 +388,12 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
+        # 60% - GitHub, 20% - Jungle, 20% - TheScrapelab
         chance = random.random()
-        if chance < 0.5:
+        if chance < 0.6:
             targets = await asyncio.to_thread(fetch_github_targets)
-        elif chance < 0.75:
-            targets = await asyncio.to_thread(fetch_apify_targets)
-        elif chance < 0.9:
-            targets = await asyncio.to_thread(fetch_gitlab_harvester_targets)
         else:
-            targets = await asyncio.to_thread(fetch_github_targets) # Добираем GitHub'ом
+            targets = await asyncio.to_thread(fetch_apify_targets)
             
         total_checked += len(targets)
         # ... дальше идет цикл for t in targets: (его менять не нужно)
