@@ -23,7 +23,11 @@ jobs:
         with:
           python-version: '3.10'
           
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install gitlab-harvester  # <-- Явная установка
           
       - name: Run Bot
         env:
@@ -40,5 +44,11 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add dead_hashes.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead hashes [skip ci]" && git push)
+          
+          # Проверяем, существует ли файл, и только тогда добавляем его в git
+          if [ -f dead_hashes.txt ]; then
+            git add dead_hashes.txt
+            git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead hashes [skip ci]" && git push)
+          else
+            echo "Файл dead_hashes.txt не найден, коммит не требуется."
+          fi
