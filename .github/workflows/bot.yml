@@ -4,6 +4,10 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: parser-bot
+  cancel-in-progress: false
+
 # Даем боту права на запись в репозиторий, чтобы он мог делать коммит
 permissions:
   contents: write
