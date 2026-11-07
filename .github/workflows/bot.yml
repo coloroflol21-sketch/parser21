@@ -38,16 +38,20 @@ jobs:
         run: python main.py
         
       # СОХРАНЯЕМ ФАЙЛ В РЕПОЗИТОРИЙ
-      - name: Commit Dead Hashes
+      - name: Commit Cache and Dead Hashes
         if: always()
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          
-          # Проверяем, существует ли файл, и только тогда добавляем его в git
-          if [ -f dead_hashes.txt ]; then
-            git add dead_hashes.txt
-            git diff --quiet && git diff --staged --quiet || (git commit -m "Update dead hashes [skip ci]" && git push)
+
+          FILES=""
+          [ -f dead_hashes.txt ] && FILES="$FILES dead_hashes.txt"
+          [ -f github_seen_repos.txt ] && FILES="$FILES github_seen_repos.txt"
+          [ -f github_pages.json ] && FILES="$FILES github_pages.json"
+
+          if [ -n "$FILES" ]; then
+            git add $FILES
+            git diff --quiet && git diff --staged --quiet || (git commit -m "Update caches [skip ci]" && git push)
           else
-            echo "Файл dead_hashes.txt не найден, коммит не требуется."
+            echo "Нет файлов для коммита."
           fi
