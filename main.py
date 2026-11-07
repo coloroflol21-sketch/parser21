@@ -220,15 +220,29 @@ def fetch_github_targets():
     
     # Расширенный список запросов
     queries = [
+        # OpenAI
         "sk-proj- language:Python", "sk-proj- language:JavaScript", "sk-proj- language:TypeScript",
         "sk-proj- language:Go", "sk-proj- language:Rust", "sk-proj- language:Java",
-        "sk-proj- language:PHP", "sk-proj- language:Ruby",
+        "sk-proj- language:PHP", "sk-proj- language:Ruby", "sk-proj- language:C++",
+        "sk-proj- language:C#", "sk-proj- language:Kotlin", "sk-proj- language:Swift",
+        # Anthropic
         "sk-ant-api03- language:Python", "sk-ant-api03- language:JavaScript",
+        "sk-ant-api03- language:TypeScript", "sk-ant-api03- language:Go",
+        # HuggingFace
         "hf_ language:Python", "hf_ language:JSON", "hf_ language:YAML",
-        "sk-kimi- language:Python", "sk-cp- language:Python", "sk-sp- language:Python",
-        "\"gsk_\" language:Python", "\"pplx-\" language:Python", "\"AIzaSy\" language:Python",
+        "hf_ language:Shell", "hf_ language:Markdown",
+        # Другие провайдеры
+        "sk-kimi- language:Python", "sk-kimi- language:JavaScript",
+        "sk-cp- language:Python", "sk-sp- language:Python",
+        "\"gsk_\" language:Python", "\"gsk_\" language:JavaScript",
+        "\"pplx-\" language:Python", "\"pplx-\" language:JavaScript",
+        "\"AIzaSy\" language:Python", "\"AIzaSy\" language:JavaScript",
         "\"sk-\" language:JSON", "\"sk-\" language:YAML", "\"sk-\" language:JavaScript",
-        "\"sk-\" language:Go", "\"sk-\" language:Rust"
+        "\"sk-\" language:Go", "\"sk-\" language:Rust", "\"sk-\" language:Shell",
+        "\"sk-\" language:Dockerfile", "\"sk-\" language:Makefile",
+        # Поиск по именам файлов (очень эффективно)
+        "sk- filename:.env", "sk- filename:config.json",
+        "sk- filename:settings.py", "sk- filename:docker-compose.yml"
     ]
     query = random.choice(queries)
 
