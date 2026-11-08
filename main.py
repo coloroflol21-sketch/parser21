@@ -69,20 +69,69 @@ REPO_HINTS = {
 }
 
 # ─── ГЕНЕРАТОР ЗАПРОСОВ ────────────────────────────────────────────────────
-PREFIXES = ["sk-proj-", "sk-ant-api03-", "hf_", "sk-kimi-", "sk-cp-", "sk-sp-", "gsk_", "pplx-", "AIzaSy", "sk-"]
-LANGUAGES = ["Python", "JavaScript", "TypeScript", "Go", "Rust", "Java", "PHP", "Ruby", "C++", "C#", "Kotlin", "Swift", "Shell", "YAML", "JSON", "Dockerfile", "Makefile", "Markdown"]
-QUALIFIERS = ["filename:.env", "filename:config.json", "filename:settings.py", "filename:docker-compose.yml", "filename:*.yaml", "filename:*.yml", "path:.env", "path:config", "path:settings", "path:secrets", "extension:json", "extension:yaml", "extension:env", "extension:py", "extension:js", "extension:ts", "size:<1000"]
+# ─── ГЕНЕРАТОР ЗАПРОСОВ (РАСШИРЕННЫЙ) ────────────────────────────────────────
+PREFIXES = [
+    "sk-proj-", "sk-ant-api03-", "hf_", "sk-kimi-", "sk-cp-", "sk-sp-",
+    "gsk_", "pplx-", "AIzaSy", "sk-", "sk-or-v1-", "r8_", "sk-ws-",
+    "sk-or-", "sk-ant-", "sk-kimi-", "claude-", "gemini-", "gpt-", "api_key="
+]
+
+LANGUAGES = [
+    "Python", "JavaScript", "TypeScript", "Go", "Rust", "Java", "PHP", "Ruby",
+    "C++", "C#", "Kotlin", "Swift", "Shell", "YAML", "JSON", "Dockerfile",
+    "Makefile", "Markdown", "HTML", "CSS", "SQL", "Terraform", "Vue", "Svelte",
+    "Scala", "Perl", "Lua", "R", "Dart", "Elixir", "Haskell", "Clojure"
+]
+
+QUALIFIERS = [
+    # Файлы
+    "filename:.env", "filename:config.json", "filename:settings.py",
+    "filename:docker-compose.yml", "filename:*.yaml", "filename:*.yml",
+    "filename:*.toml", "filename:*.ini", "filename:*.cfg", "filename:*.conf",
+    "filename:credentials", "filename:secrets", "filename:.npmrc",
+    "filename:.pypirc", "filename:.aws", "filename:.gitconfig",
+    # Пути
+    "path:.env", "path:config", "path:settings", "path:secrets", "path:credentials",
+    "path:deploy", "path:docker", "path:k8s", "path:helm",
+    # Расширения
+    "extension:json", "extension:yaml", "extension:yml", "extension:env",
+    "extension:py", "extension:js", "extension:ts", "extension:go",
+    "extension:rs", "extension:java", "extension:php", "extension:rb",
+    "extension:sh", "extension:tf", "extension:dockerfile",
+    # Размер
+    "size:<1000", "size:<500", "size:<200",
+    # Организации
+    "org:openai", "org:anthropic", "org:google", "org:microsoft", "org:meta",
+    "org:facebook", "org:aws", "org:azure", "org:huggingface", "org:mistralai",
+    # Точные фразы
+    '"sk-proj-"', '"sk-ant-"', '"hf_"', '"gsk_"', '"pplx-"', '"AIzaSy"',
+    '"api_key="', '"API_KEY="', '"secret_key="', '"access_token="',
+    # Комбинации (два квалификатора)
+    "filename:.env extension:py", "filename:config.json extension:json",
+    "path:config filename:*.yaml", "path:secrets filename:*.env",
+    "org:openai filename:.env", "org:anthropic filename:*.py",
+]
 
 def get_random_github_query():
+    # Выбираем случайный префикс
     prefix = random.choice(PREFIXES)
-    if random.random() < 0.7:
+    
+    # 80% шанс добавить язык
+    if random.random() < 0.8:
         lang = random.choice(LANGUAGES)
         base = f"{prefix} language:{lang}"
     else:
         base = prefix
-    if random.random() < 0.4:
+    
+    # 60% шанс добавить квалификатор (иногда два)
+    if random.random() < 0.6:
         qual = random.choice(QUALIFIERS)
+        # 20% шанс добавить второй квалификатор, если первый не содержит пробел
+        if " " not in qual and random.random() < 0.2:
+            qual2 = random.choice([q for q in QUALIFIERS if " " not in q and q != qual])
+            return f"{base} {qual} {qual2}"
         return f"{base} {qual}"
+    
     return base
 
 # ─── БАЗА ДАННЫХ И КЭШИ ────────────────────────────────────────────────────
