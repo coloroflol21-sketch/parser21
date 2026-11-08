@@ -32,8 +32,8 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PARSER_PAT }}
+          GITHUB_TOKENS: ${{ secrets.GITHUB_TOKENS }}  # опционально, список через запятую
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: python main.py
         
